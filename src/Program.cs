@@ -140,6 +140,7 @@ namespace NyaaChatNative
 
         private ClientWebSocket ws;
         private CancellationTokenSource cts;
+        private readonly SemaphoreSlim sendLock = new SemaphoreSlim(1, 1);
         private readonly JavaScriptSerializer json;
         private readonly MainForm form;
 
@@ -177,33 +178,50 @@ namespace NyaaChatNative
             {
                 try
                 {
-                    ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+                    try
+                    {
+                        // Enable TLS 1.3 (12288) + TLS 1.2 (3072) when supported by OS
+                        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | (SecurityProtocolType)12288;
+                    }
+                    catch
+                    {
+                        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+                    }
+
                     this.ws = new ClientWebSocket();
                     this.ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
 
-                    string wsScheme = this.ServerUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ? "wss://" : "ws://";
+                    bool isSecure = this.ServerUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+                    string wsScheme = isSecure ? "wss://" : "ws://";
                     string rest = Regex.Replace(this.ServerUrl, "^https?://", "", RegexOptions.IgnoreCase).TrimEnd('/');
                     Uri wsUri = new Uri(wsScheme + rest + "/socket.io/?EIO=4&transport=websocket");
 
                     await this.ws.ConnectAsync(wsUri, token);
 
                     byte[] buffer = new byte[65536];
-                    StringBuilder msgBuilder = new StringBuilder();
+                    const int MAX_PACKET_BYTES = 4 * 1024 * 1024; // 4MB DoS protection cap
 
-                    while (this.ws.State == WebSocketState.Open && !token.IsCancellationRequested)
+                    using (MemoryStream frameStream = new MemoryStream())
                     {
-                        WebSocketReceiveResult result = await this.ws.ReceiveAsync(new ArraySegment<byte>(buffer), token);
-                        if (result.MessageType == WebSocketMessageType.Close)
+                        while (this.ws.State == WebSocketState.Open && !token.IsCancellationRequested)
                         {
-                            break;
-                        }
+                            WebSocketReceiveResult result = await this.ws.ReceiveAsync(new ArraySegment<byte>(buffer), token);
+                            if (result.MessageType == WebSocketMessageType.Close)
+                            {
+                                break;
+                            }
 
-                        msgBuilder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
-                        if (result.EndOfMessage)
-                        {
-                            string rawPacket = msgBuilder.ToString();
-                            msgBuilder.Clear();
-                            HandleEngineIoPacket(rawPacket);
+                            if (frameStream.Length + result.Count <= MAX_PACKET_BYTES)
+                            {
+                                frameStream.Write(buffer, 0, result.Count);
+                            }
+
+                            if (result.EndOfMessage)
+                            {
+                                string rawPacket = Encoding.UTF8.GetString(frameStream.GetBuffer(), 0, (int)frameStream.Length);
+                                frameStream.SetLength(0);
+                                HandleEngineIoPacket(rawPacket);
+                            }
                         }
                     }
                 }
@@ -298,12 +316,29 @@ namespace NyaaChatNative
         {
             ClientWebSocket currentWs = this.ws;
             if (currentWs == null || currentWs.State != WebSocketState.Open) return;
-            try
+            byte[] bytes = Encoding.UTF8.GetBytes(raw);
+
+            Task.Run(async () =>
             {
-                byte[] bytes = Encoding.UTF8.GetBytes(raw);
-                currentWs.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
-            }
-            catch { }
+                bool acquired = false;
+                try
+                {
+                    await this.sendLock.WaitAsync();
+                    acquired = true;
+                    if (currentWs.State == WebSocketState.Open)
+                    {
+                        await currentWs.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
+                    }
+                }
+                catch { }
+                finally
+                {
+                    if (acquired)
+                    {
+                        try { this.sendLock.Release(); } catch { }
+                    }
+                }
+            });
         }
 
         public void Disconnect()
@@ -346,6 +381,10 @@ namespace NyaaChatNative
         [DllImport("user32.dll", SetLastError = true)]
         private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        private const int WM_SETREDRAW = 0x000B;
         private const int GWL_EXSTYLE = -20;
         private const int WS_EX_LAYERED = 0x00080000;
         private const int HOTKEY_ID_BOSS = 9001;
@@ -902,7 +941,7 @@ namespace NyaaChatNative
             };
             this.rtbChat.LinkClicked += delegate (object s, LinkClickedEventArgs e)
             {
-                try { Process.Start(e.LinkText); } catch { }
+                HandleChatLinkClicked(e.LinkText);
             };
 
             this.rightInnerSplit.Panel1.Controls.Add(this.rtbChat);
@@ -1336,7 +1375,11 @@ namespace NyaaChatNative
             this.ActiveSession = session;
             this.ActiveRoomId = targetChannel;
 
-            AppendSystemMessageToSession(session, targetChannel, string.Format("* 🌐 [{0}] 서버에 연결 중입니다... (채널: {1})", session.Host, targetChannel));
+            AppendSystemMessageToSession(session, targetChannel, string.Format("* [{0}] 서버에 연결 중입니다... (채널: {1})", session.Host, targetChannel));
+            if (normUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+            {
+                AppendSystemMessageToSession(session, targetChannel, string.Format("* [보안 안내] 현재 서버({0})는 TLS 암호화가 없는 일반 연결(ws://)입니다. 중요한 비밀번호 입력에 주의하세요.", session.Host));
+            }
             RefreshLeftServerTree();
             SwitchActiveView(session, targetChannel);
 
@@ -1357,7 +1400,7 @@ namespace NyaaChatNative
 
         public void OnSessionConnectionError(NyaaServerSession session, string errMsg)
         {
-            AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format("* ⚠️ [{0}] 서버 연결 오류: {1}", session.Host, errMsg));
+            AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format("* [연결 오류] [{0}] 서버: {1}", session.Host, errMsg));
             UpdateConnectionBadge();
         }
 
@@ -1370,11 +1413,11 @@ namespace NyaaChatNative
             }
             if (connectedCount > 0)
             {
-                this.lblConnBadge.Text = string.Format("🟢 {0}개 서버 동시접속중", connectedCount);
+                this.lblConnBadge.Text = string.Format("● {0}개 서버 동시접속중", connectedCount);
             }
             else
             {
-                this.lblConnBadge.Text = "🟠 서버 연결 대기중";
+                this.lblConnBadge.Text = "○ 서버 연결 대기중";
             }
         }
 
@@ -1492,7 +1535,7 @@ namespace NyaaChatNative
             {
                 string chId = data.ContainsKey("channelId") ? Convert.ToString(data["channelId"]) : "";
                 string msg = data.ContainsKey("message") ? Convert.ToString(data["message"]) : "이 채널은 비밀번호(+k)가 설정되어 있습니다.";
-                AppendSystemMessageToSession(session, this.ActiveRoomId, "🔒 " + msg);
+                AppendSystemMessageToSession(session, this.ActiveRoomId, "* [비밀번호 필요] " + msg);
                 if (!string.IsNullOrEmpty(chId))
                 {
                     PromptChannelKeyInputDialog(session, chId, msg);
@@ -1504,7 +1547,7 @@ namespace NyaaChatNative
                 string byNick = data.ContainsKey("inviterNickname") ? Convert.ToString(data["inviterNickname"]) : "누군가";
                 if (!string.IsNullOrEmpty(chId))
                 {
-                    AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format("✉️ [{0}] 님이 귀하를 [{1}] 채널로 초대했습니다. (/join {1})", byNick, chId));
+                    AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format("* [채널 초대] [{0}] 님이 귀하를 [{1}] 채널로 초대했습니다. (/join {1})", byNick, chId));
                 }
             }
             else if (eventName == "nickname_changed" && data != null)
@@ -1515,7 +1558,7 @@ namespace NyaaChatNative
                     session.MyNickname = newNick;
                     this.GlobalNickname = newNick;
                     SetIniValue("User", "DefaultNickname", newNick, true);
-                    AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format("* ✨ 닉네임이 \"{0}\"(으)로 변경되었습니다.", newNick));
+                    AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format("* 닉네임이 \"{0}\"(으)로 변경되었습니다.", newNick));
                 }
             }
             else if (eventName == "whois_result" && data != null)
@@ -1538,18 +1581,18 @@ namespace NyaaChatNative
             {
                 session.IsMeServerOper = true;
                 string msg = data.ContainsKey("message") ? Convert.ToString(data["message"]) : "관리자 권한이 활성화되었습니다.";
-                AppendSystemMessageToSession(session, this.ActiveRoomId, "👑 " + msg);
+                AppendSystemMessageToSession(session, this.ActiveRoomId, "* [관리자 인증] " + msg);
                 session.Emit("get_channel_list", new Dictionary<string, object>());
             }
             else if (eventName == "oper_failed" && data != null)
             {
                 string msg = data.ContainsKey("message") ? Convert.ToString(data["message"]) : "관리자 인증 실패";
-                AppendSystemMessageToSession(session, this.ActiveRoomId, "❌ " + msg);
+                AppendSystemMessageToSession(session, this.ActiveRoomId, "* [인증 실패] " + msg);
             }
             else if (eventName == "login_error" && data != null)
             {
                 string msg = data.ContainsKey("message") ? Convert.ToString(data["message"]) : "로그인 오류";
-                AppendSystemMessageToSession(session, this.ActiveRoomId, "* ⚠️ [접속 거부]: " + msg);
+                AppendSystemMessageToSession(session, this.ActiveRoomId, "* [접속 거부]: " + msg);
             }
             else if (eventName == "network_directory_result" && data != null)
             {
@@ -1616,7 +1659,7 @@ namespace NyaaChatNative
                 AppendSystemMessageToSession(
                     session,
                     roomId,
-                    string.Format("* 💡 [{0} 전용 확장 기능 활성화] 사용 가능 명령어: {1} (타 서버 창으로 전환 시 자동 비활성화되어 기본 호환성을 유지합니다)",
+                    string.Format("* [{0} 전용 확장 기능 활성화] 사용 가능 명령어: {1} (타 서버 창으로 전환 시 자동 비활성화되어 기본 호환성을 유지합니다)",
                         session.ServerName,
                         string.Join(", ", cmdNames.ToArray()))
                 );
@@ -1793,16 +1836,21 @@ namespace NyaaChatNative
             }
         }
 
+        private long lastOnTextAutoTriggerMs = 0;
+
         private void CheckOnTextScriptRules(NyaaServerSession session, string roomId, string senderNick, string content)
         {
+            long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             foreach (string[] rule in this.OnTextRules)
             {
                 string keyword = rule[0];
                 string action = rule[1];
-                string val = ExpandScriptVariables(rule[2], session, roomId, content);
 
                 if (!string.IsNullOrEmpty(keyword) && content.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0)
                 {
+                    bool isShellAction = (action == "EXEC" || action == "EXEC_SAY" || action == "EXEC_NOTICE");
+                    string val = ExpandScriptVariables(rule[2], session, roomId, content, isShellAction);
+
                     if (action == "NOTICE")
                     {
                         AppendSystemMessageToSession(session, roomId, "* " + val);
@@ -1813,6 +1861,9 @@ namespace NyaaChatNative
                     }
                     else if (action == "REPLY")
                     {
+                        // 2-second cooldown to prevent infinite auto-reply loops between clients
+                        if (nowMs - this.lastOnTextAutoTriggerMs < 2000) continue;
+                        this.lastOnTextAutoTriggerMs = nowMs;
                         session.Emit("send_message", new Dictionary<string, object>
                         {
                             { "roomId", roomId },
@@ -1822,11 +1873,15 @@ namespace NyaaChatNative
                     }
                     else if (action == "EXEC" || action == "EXEC_SAY")
                     {
-                        RunExternalScriptCommandAsync(session, roomId, val, true);
+                        if (nowMs - this.lastOnTextAutoTriggerMs < 2000) continue;
+                        this.lastOnTextAutoTriggerMs = nowMs;
+                        RunExternalScriptCommandAsync(session, roomId, val, true, content);
                     }
                     else if (action == "EXEC_NOTICE")
                     {
-                        RunExternalScriptCommandAsync(session, roomId, val, false);
+                        if (nowMs - this.lastOnTextAutoTriggerMs < 2000) continue;
+                        this.lastOnTextAutoTriggerMs = nowMs;
+                        RunExternalScriptCommandAsync(session, roomId, val, false, content);
                     }
                 }
             }
@@ -1847,7 +1902,10 @@ namespace NyaaChatNative
                 Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
             };
 
-            session.GetOrCreateRoomHistory(roomId).Add(item);
+            List<ChatMessageItem> history = session.GetOrCreateRoomHistory(roomId);
+            history.Add(item);
+            if (history.Count > 500) history.RemoveAt(0);
+
             if (this.ActiveSession == session && string.Equals(this.ActiveRoomId, roomId, StringComparison.OrdinalIgnoreCase))
             {
                 AppendSingleMessageToRtb(item);
@@ -2087,26 +2145,51 @@ namespace NyaaChatNative
 
         public void RedrawActiveChatHistory()
         {
-            this.rtbChat.SuspendLayout();
-            this.rtbChat.Clear();
+            if (this.rtbChat.IsDisposed) return;
 
-            if (this.ActiveSession != null)
+            bool handleCreated = this.rtbChat.IsHandleCreated;
+            if (handleCreated)
             {
-                List<ChatMessageItem> history = this.ActiveSession.GetOrCreateRoomHistory(this.ActiveRoomId);
-                foreach (ChatMessageItem m in history)
+                SendMessage(this.rtbChat.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+            }
+            this.rtbChat.SuspendLayout();
+            try
+            {
+                this.rtbChat.Clear();
+
+                if (this.ActiveSession != null)
                 {
-                    AppendSingleMessageToRtb(m, false);
+                    List<ChatMessageItem> history = this.ActiveSession.GetOrCreateRoomHistory(this.ActiveRoomId);
+                    foreach (ChatMessageItem m in history)
+                    {
+                        AppendSingleMessageToRtb(m, false);
+                    }
+                }
+
+                this.rtbChat.SelectionStart = this.rtbChat.TextLength;
+                this.rtbChat.ScrollToCaret();
+            }
+            finally
+            {
+                this.rtbChat.ResumeLayout();
+                if (handleCreated)
+                {
+                    SendMessage(this.rtbChat.Handle, WM_SETREDRAW, new IntPtr(1), IntPtr.Zero);
+                    this.rtbChat.Invalidate();
                 }
             }
-
-            this.rtbChat.SelectionStart = this.rtbChat.TextLength;
-            this.rtbChat.ScrollToCaret();
-            this.rtbChat.ResumeLayout();
         }
 
         private void AppendSingleMessageToRtb(ChatMessageItem m, bool autoScroll = true)
         {
             if (this.rtbChat.IsDisposed) return;
+
+            // Keep RichTextBox buffer bounded so long sessions remain at 0ms latency
+            if (autoScroll && this.rtbChat.TextLength > 120000)
+            {
+                RedrawActiveChatHistory();
+                return;
+            }
 
             bool showTs = GetIni("Theme", "ShowTimestamps", "true").ToLower() != "false";
             DateTime dt = DateTimeOffset.FromUnixTimeMilliseconds(m.Timestamp > 0 ? m.Timestamp : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()).ToLocalTime().DateTime;
@@ -2238,7 +2321,7 @@ namespace NyaaChatNative
         {
             if (this.ActiveSession == null || !this.ActiveSession.IsConnected)
             {
-                MessageBox.Show("현재 연결된 서버가 없습니다. 상단 [🌐 서버 리스트] 또는 [➕ 서버 추가접속]을 눌러주세요.", "연결 안내", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("현재 연결된 서버가 없습니다. 상단 [서버 리스트 (F2)] 또는 [+ 서버 추가접속]을 눌러주세요.", "연결 안내", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -2580,11 +2663,12 @@ namespace NyaaChatNative
             {
                 string[] rule = this.CustomCommandRules[cmd];
                 string mode = (rule[0] ?? "SAY").Trim().ToUpperInvariant();
-                string expanded = ExpandScriptVariables(rule[1], this.ActiveSession, this.ActiveRoomId, restText);
+                bool isShell = (mode == "EXEC" || mode == "EXEC_SAY" || mode == "EXEC_NOTICE");
+                string expanded = ExpandScriptVariables(rule[1], this.ActiveSession, this.ActiveRoomId, restText, isShell);
                 if (mode == "NOTICE") AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, "* " + expanded);
                 else if (mode == "ACTION") ExecuteSlashCommand("/me " + expanded);
-                else if (mode == "EXEC" || mode == "EXEC_SAY") RunExternalScriptCommandAsync(this.ActiveSession, this.ActiveRoomId, expanded, true);
-                else if (mode == "EXEC_NOTICE") RunExternalScriptCommandAsync(this.ActiveSession, this.ActiveRoomId, expanded, false);
+                else if (mode == "EXEC" || mode == "EXEC_SAY") RunExternalScriptCommandAsync(this.ActiveSession, this.ActiveRoomId, expanded, true, restText);
+                else if (mode == "EXEC_NOTICE") RunExternalScriptCommandAsync(this.ActiveSession, this.ActiveRoomId, expanded, false, restText);
                 else SendChatMessageOnActiveSession(expanded);
                 return;
             }
@@ -2593,7 +2677,7 @@ namespace NyaaChatNative
             if (this.AliasesMap.ContainsKey(cmd))
             {
                 string tpl = this.AliasesMap[cmd];
-                string expanded = ExpandScriptVariables(tpl, this.ActiveSession, this.ActiveRoomId, restText);
+                string expanded = ExpandScriptVariables(tpl, this.ActiveSession, this.ActiveRoomId, restText, false);
                 if (expanded.StartsWith("/") && !string.Equals(expanded, trimmed, StringComparison.OrdinalIgnoreCase))
                 {
                     ExecuteSlashCommand(expanded);
@@ -2613,15 +2697,16 @@ namespace NyaaChatNative
             string[] p = rawRule.Split(new char[] { '|' }, 2);
             string mode = p.Length == 2 ? p[0].Trim().ToUpperInvariant() : "SAY";
             string tpl = p.Length == 2 ? p[1].Trim() : rawRule.Trim();
-            string expanded = ExpandScriptVariables(tpl, this.ActiveSession, this.ActiveRoomId, restText);
+            bool isShell = (mode == "EXEC" || mode == "EXEC_SAY" || mode == "EXEC_NOTICE");
+            string expanded = ExpandScriptVariables(tpl, this.ActiveSession, this.ActiveRoomId, restText, isShell);
             if (mode == "NOTICE") AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, "* " + expanded);
             else if (mode == "ACTION") ExecuteSlashCommand("/me " + expanded);
-            else if (mode == "EXEC" || mode == "EXEC_SAY") RunExternalScriptCommandAsync(this.ActiveSession, this.ActiveRoomId, expanded, true);
-            else if (mode == "EXEC_NOTICE") RunExternalScriptCommandAsync(this.ActiveSession, this.ActiveRoomId, expanded, false);
+            else if (mode == "EXEC" || mode == "EXEC_SAY") RunExternalScriptCommandAsync(this.ActiveSession, this.ActiveRoomId, expanded, true, restText);
+            else if (mode == "EXEC_NOTICE") RunExternalScriptCommandAsync(this.ActiveSession, this.ActiveRoomId, expanded, false, restText);
             else SendChatMessageOnActiveSession(expanded);
         }
 
-        private void RunExternalScriptCommandAsync(NyaaServerSession session, string roomId, string commandLine, bool sendAsChat)
+        private void RunExternalScriptCommandAsync(NyaaServerSession session, string roomId, string commandLine, bool sendAsChat, string rawArgs = "")
         {
             if (session == null || string.IsNullOrEmpty(commandLine)) return;
             ThreadPool.QueueUserWorkItem(delegate
@@ -2643,36 +2728,59 @@ namespace NyaaChatNative
                     psi.EnvironmentVariables["NYAA_CHAN"] = roomId ?? "#자유대화";
                     psi.EnvironmentVariables["NYAA_SERVER"] = session.ServerName ?? "";
                     psi.EnvironmentVariables["NYAA_HOST"] = session.Host ?? "";
+                    psi.EnvironmentVariables["NYAA_ARGS"] = rawArgs ?? "";
 
                     using (Process proc = Process.Start(psi))
                     {
                         string output = proc.StandardOutput.ReadToEnd();
-                        proc.WaitForExit(8000);
+                        if (!proc.WaitForExit(8000))
+                        {
+                            try { proc.Kill(); } catch { }
+                        }
                         if (!string.IsNullOrEmpty(output))
                         {
                             string[] lines = output.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
                             this.BeginInvoke((MethodInvoker)delegate
                             {
+                                const int MAX_CHAT_LINES = 5;
+                                const int MAX_LINE_CHARS = 400;
+                                int sentLines = 0;
+
                                 foreach (string line in lines)
                                 {
                                     string clean = line.Trim();
                                     if (string.IsNullOrEmpty(clean)) continue;
+
                                     if (!sendAsChat)
                                     {
                                         AppendSystemMessageToSession(session, roomId, "* " + clean);
                                     }
-                                    else if (clean.StartsWith("/"))
-                                    {
-                                        ExecuteSlashCommand(clean);
-                                    }
                                     else
                                     {
-                                        session.Emit("send_message", new Dictionary<string, object>
+                                        if (sentLines >= MAX_CHAT_LINES)
                                         {
-                                            { "roomId", roomId },
-                                            { "content", clean },
-                                            { "type", "text" }
-                                        });
+                                            AppendSystemMessageToSession(session, roomId, "* [도배 방지] 외부 스크립트의 채팅 전송은 1회 최대 5줄까지만 전송됩니다.");
+                                            break;
+                                        }
+                                        if (clean.Length > MAX_LINE_CHARS)
+                                        {
+                                            clean = clean.Substring(0, MAX_LINE_CHARS) + "...";
+                                        }
+                                        sentLines++;
+
+                                        if (clean.StartsWith("/"))
+                                        {
+                                            ExecuteSlashCommand(clean);
+                                        }
+                                        else
+                                        {
+                                            session.Emit("send_message", new Dictionary<string, object>
+                                            {
+                                                { "roomId", roomId },
+                                                { "content", clean },
+                                                { "type", "text" }
+                                            });
+                                        }
                                     }
                                 }
                             });
@@ -2689,22 +2797,41 @@ namespace NyaaChatNative
             });
         }
 
-        private string ExpandScriptVariables(string template, NyaaServerSession session, string roomId, string argsText)
+        private static string SanitizeShellArgument(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return "";
+            // Strip shell command-chaining, redirection, and variable expansion metacharacters
+            return Regex.Replace(raw, @"[&|;><`^%\r\n""]", " ").Trim();
+        }
+
+        private string ExpandScriptVariables(string template, NyaaServerSession session, string roomId, string argsText, bool forShellExec = false)
         {
             if (string.IsNullOrEmpty(template)) return "";
             string nick = session != null ? session.MyNickname : this.GlobalNickname;
             string srvName = session != null ? session.ServerName : "서버";
             string host = session != null ? session.Host : "";
-            string[] argParts = string.IsNullOrEmpty(argsText) ? new string[0] : Regex.Split(argsText, @"\s+");
+            string chan = roomId ?? "#자유대화";
+            string safeArgs = argsText ?? "";
+
+            if (forShellExec)
+            {
+                nick = SanitizeShellArgument(nick);
+                srvName = SanitizeShellArgument(srvName);
+                host = SanitizeShellArgument(host);
+                chan = SanitizeShellArgument(chan);
+                safeArgs = SanitizeShellArgument(safeArgs);
+            }
+
+            string[] argParts = string.IsNullOrEmpty(safeArgs) ? new string[0] : Regex.Split(safeArgs, @"\s+");
 
             string res = template
                 .Replace("$me", nick)
                 .Replace("$nick", nick)
-                .Replace("$chan", roomId ?? "#자유대화")
+                .Replace("$chan", chan)
                 .Replace("$server", srvName)
                 .Replace("$host", host)
                 .Replace("$time", DateTime.Now.ToString("HH:mm:ss"))
-                .Replace("$1-", argsText ?? "")
+                .Replace("$1-", safeArgs)
                 .Replace("$1", argParts.Length >= 1 ? argParts[0] : "")
                 .Replace("$2", argParts.Length >= 2 ? argParts[1] : "");
 
@@ -2718,6 +2845,113 @@ namespace NyaaChatNative
             });
 
             return res;
+        }
+
+        private void HandleChatLinkClicked(string rawUrl)
+        {
+            if (string.IsNullOrEmpty(rawUrl)) return;
+
+            Uri uri;
+            if (!Uri.TryCreate(rawUrl.Trim(), UriKind.Absolute, out uri) ||
+                (!string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase) &&
+                 !string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase)))
+            {
+                MessageBox.Show(
+                    "보안 정책에 따라 웹 주소(http:// 또는 https://)가 아닌 링크는 실행이 차단되었습니다.\r\n\r\n차단된 경로: " + rawUrl,
+                    "보안 차단 안내",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning
+                );
+                return;
+            }
+
+            bool skipWarning = GetIni("Security", "SkipLinkWarning", "false").ToLower() == "true";
+            if (!skipWarning)
+            {
+                using (Form dlg = new Form())
+                {
+                    dlg.Text = "외부 링크 열기 확인";
+                    dlg.Size = new Size(480, 235);
+                    dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
+                    dlg.StartPosition = FormStartPosition.CenterParent;
+                    dlg.MaximizeBox = false;
+                    dlg.MinimizeBox = false;
+                    dlg.BackColor = this.ColBgWindow;
+                    dlg.ForeColor = this.ColTextPrimary;
+
+                    Label lblTitle = new Label
+                    {
+                        Text = "채팅창의 외부 링크를 웹 브라우저로 열려고 합니다.\r\n접속하려는 주소가 안전한 사이트인지 확인해 주세요.",
+                        Location = new Point(18, 14),
+                        Size = new Size(430, 38),
+                        Font = new Font("맑은 고딕", 9.2f, FontStyle.Bold),
+                        ForeColor = this.ColTextPrimary
+                    };
+
+                    TextBox txtUrl = new TextBox
+                    {
+                        Text = uri.AbsoluteUri,
+                        ReadOnly = true,
+                        Location = new Point(18, 58),
+                        Width = 428,
+                        BackColor = this.ColBgInput,
+                        ForeColor = this.ColTextSystem,
+                        Font = new Font("Consolas", 9.5f)
+                    };
+
+                    CheckBox chkSkipNext = new CheckBox
+                    {
+                        Text = "다음부터 외부 링크 클릭 시 이 경고창을 표시하지 않기",
+                        Checked = false,
+                        Location = new Point(18, 96),
+                        AutoSize = true,
+                        ForeColor = this.ColTextSecondary
+                    };
+
+                    Button btnOpen = new Button
+                    {
+                        Text = "웹 브라우저로 열기",
+                        Location = new Point(214, 140),
+                        Size = new Size(136, 34),
+                        FlatStyle = FlatStyle.Flat,
+                        BackColor = this.ColAccent,
+                        ForeColor = Color.White,
+                        Font = new Font("맑은 고딕", 9f, FontStyle.Bold),
+                        DialogResult = DialogResult.OK
+                    };
+
+                    Button btnCancel = new Button
+                    {
+                        Text = "취소",
+                        Location = new Point(358, 140),
+                        Size = new Size(88, 34),
+                        FlatStyle = FlatStyle.Flat,
+                        BackColor = this.ColBgSidebar,
+                        ForeColor = this.ColTextPrimary,
+                        DialogResult = DialogResult.Cancel
+                    };
+
+                    dlg.AcceptButton = btnOpen;
+                    dlg.CancelButton = btnCancel;
+                    dlg.Controls.AddRange(new Control[] { lblTitle, txtUrl, chkSkipNext, btnOpen, btnCancel });
+
+                    if (dlg.ShowDialog(this) != DialogResult.OK)
+                    {
+                        return;
+                    }
+
+                    if (chkSkipNext.Checked)
+                    {
+                        SetIniValue("Security", "SkipLinkWarning", "true", true);
+                    }
+                }
+            }
+
+            try
+            {
+                Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
+            }
+            catch { }
         }
 
         private void ShowHelpNotice()
@@ -3536,8 +3770,15 @@ namespace NyaaChatNative
         private string SanitizeFileName(string raw)
         {
             if (string.IsNullOrEmpty(raw)) return "log";
-            string s = raw;
+            string s = raw.Trim();
             foreach (char c in Path.GetInvalidFileNameChars()) s = s.Replace(c, '_');
+            s = s.Replace("..", "_").Trim('.', ' ');
+            if (s.Length > 60) s = s.Substring(0, 60);
+            if (string.IsNullOrEmpty(s)) return "log";
+            if (Regex.IsMatch(s, @"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$", RegexOptions.IgnoreCase))
+            {
+                s = "_" + s;
+            }
             return s;
         }
 
