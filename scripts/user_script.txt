@@ -1,10 +1,16 @@
 # ============================================================================
 # Nyaa Chat 네이티브 유저 커스텀 스크립트 (scripts/user_script.txt)
 # ============================================================================
-# mIRC의 Remote Script(Alt+R)처럼 내가 보낸 말, 받은 말, 커스텀 명령어를
-# 실행 파일(NyaaChat.exe) 재빌드 없이 메모장에서 바로 개조할 수 있습니다!
-# 클라이언트 상단 [🛠️ 스크립트/스킨 편집 (Alt+R)] 창에서 수정 후 [Ctrl+S]를 누르면
-# 재시작 없이 0.01초 만에 즉시 반영됩니다.
+# 클라이언트 상단 [스크립트/스킨 편집 (Alt+R)] 창에서 수정 후 [Ctrl+S]를 누르면
+# 재빌드나 재시작 없이 즉시 반영됩니다.
+#
+# [지원하는 스크립트 방식 2가지]
+# 1) 내장 매크로 DSL (언어 설치 불필요, 즉시 실행)
+#    - 동작 타입: SAY (채팅 전송), NOTICE (내 화면에만 출력), ACTION (/me 행동), SOUND (.wav 재생)
+# 2) 외부 프로그래밍 언어 스크립트 연동 (언어 제약 없음: .js, .py, .ps1, .bat, .exe 등)
+#    - 동작 타입: EXEC_SAY (스크립트 실행 결과 stdout을 채팅방에 전송)
+#                 EXEC_NOTICE (스크립트 실행 결과 stdout을 내 화면에만 출력)
+#    - Windows 기본 내장 JScript(cscript //Nologo), Node.js, Python, PowerShell, C#/C++ 실행파일 모두 호환
 # ============================================================================
 
 # ----------------------------------------------------------------------------
@@ -14,22 +20,31 @@
 REPLACE_SEND | :shrug: | ¯\_(ツ)_/¯
 REPLACE_SEND | :tableflip: | (╯°□°）╯︵ ┻━┻
 REPLACE_SEND | :unflip: | ┬─┬ ノ( ゜-゜ノ)
-REPLACE_SEND | :heart: | ❤️
-REPLACE_SEND | :nyaa: | 🐾냐아~
 
 # ----------------------------------------------------------------------------
 # 2. [ON_COMMAND] : 나만의 로컬 슬래시 명령어를 추가합니다.
 # (단, /join, /list, /nick 등 표준 기본 명령어는 하위호환 보호를 위해 덮어쓸 수 없습니다)
-# 형식: ON_COMMAND | /명령어 | 동작타입(SAY 또는 NOTICE 또는 ACTION) | 출력내용
+# 형식: ON_COMMAND | /명령어 | 동작타입(SAY / NOTICE / ACTION / EXEC_SAY / EXEC_NOTICE) | 출력내용 또는 실행명령
 # 사용 가능 변수: $me(내닉네임), $chan(현재채널), $server(현재서버이름), $host(서버주소), $time(현재시각), $1-(입력인자), $rand(최소,최대)
+# 외부 스크립트 환경변수 자동 주입: NYAA_ME, NYAA_CHAN, NYAA_SERVER, NYAA_HOST
 # ----------------------------------------------------------------------------
-ON_COMMAND | /운세 | SAY | 🔮 [$me님의 오늘의 운세] 행운 지수: $rand(50,100)% | 행운의 숫자: $rand(1,99) ✨
-ON_COMMAND | /주사위배틀 | SAY | 🎲 [$me]님이 주사위 배틀을 신청했습니다! 결과: [$rand(1,100)]점! (상대: $1-)
-ON_COMMAND | /현재서버 | NOTICE | 🌐 현재 보고 있는 창: [$server ($host)] 채널: [$chan] 시각: [$time]
+ON_COMMAND | /운세 | SAY | [$me님의 오늘의 운세] 행운 지수: $rand(50,100)% | 행운의 숫자: $rand(1,99)
+ON_COMMAND | /주사위배틀 | SAY | [$me]님이 주사위 배틀을 신청했습니다! 결과: [$rand(1,100)]점 (상대: $1-)
+ON_COMMAND | /현재서버 | NOTICE | 현재 보고 있는 창: [$server ($host)] 채널: [$chan] 시각: [$time]
+
+# [외부 언어 스크립트 실행 예시 (주석 '#' 해제 시 사용 가능)]
+# - JavaScript (Node.js):
+# ON_COMMAND | /js테스트 | EXEC_NOTICE | node scripts/my_tool.js $1-
+# - JavaScript (윈도우 기본 내장 WSH JScript - 별도 런타임 설치 불필요):
+# ON_COMMAND | /wsh테스트 | EXEC_NOTICE | cscript //Nologo scripts/my_wsh.js $1-
+# - Python (.py):
+# ON_COMMAND | /py계산 | EXEC_SAY | python scripts/calc.py $1-
+# - PowerShell (.ps1) 또는 배치파일 (.bat) / 실행파일 (.exe):
+# ON_COMMAND | /시스템정보 | EXEC_NOTICE | powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sysinfo.ps1
 
 # ----------------------------------------------------------------------------
-# 3. [ON_TEXT] : 다른 유저의 채팅에 특정 단어가 포함되면 알림/효과음/자동응답을 수행합니다.
-# 형식: ON_TEXT | 감지할단어 | 동작(SOUND 또는 NOTICE 또는 REPLY) | 값
+# 3. [ON_TEXT] : 다른 유저의 채팅에 특정 단어가 포함되면 알림/효과음/자동응답/외부스크립트를 수행합니다.
+# 형식: ON_TEXT | 감지할단어 | 동작(SOUND / NOTICE / REPLY / EXEC_NOTICE / EXEC_SAY) | 값
 # ----------------------------------------------------------------------------
 # 예시 (주석 '#'을 지우면 활성화됩니다):
-# ON_TEXT | 소드걸스 | NOTICE | 💡 채팅에서 '소드걸스' 키워드가 감지되었습니다!
+# ON_TEXT | 소드걸스 | NOTICE | [알림] 채팅에서 '소드걸스' 키워드가 감지되었습니다.

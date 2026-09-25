@@ -666,7 +666,7 @@ namespace NyaaChatNative
 
             this.lblConnBadge = new Label
             {
-                Text = "🟢 다중서버 준비됨",
+                Text = "● 다중서버 준비됨",
                 AutoSize = false,
                 Width = 175,
                 Height = 26,
@@ -675,23 +675,23 @@ namespace NyaaChatNative
                 Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
             };
 
-            this.btnServerList = CreateToolbarButton("🌐 서버 리스트 (F2)", 190, 132);
+            this.btnServerList = CreateToolbarButton("서버 리스트 (F2)", 190, 125);
             this.btnServerList.BackColor = Color.FromArgb(79, 70, 229);
             this.btnServerList.Click += delegate { OpenServerListExplorer(); };
 
-            this.btnConnectServer = CreateToolbarButton("➕ 서버 추가접속", 328, 114);
+            this.btnConnectServer = CreateToolbarButton("+ 서버 추가접속", 321, 110);
             this.btnConnectServer.Click += delegate { PromptQuickConnectServer(); };
 
-            this.btnScriptEditor = CreateToolbarButton("🛠️ 스크립트/스킨 편집 (Alt+R)", 448, 182);
+            this.btnScriptEditor = CreateToolbarButton("스크립트/스킨 편집 (Alt+R)", 437, 172);
             this.btnScriptEditor.Click += delegate { OpenScriptEditorDialog("aliases.txt"); };
 
-            this.btnSoundSettings = CreateToolbarButton("🔊 효과음 설정", 636, 102);
+            this.btnSoundSettings = CreateToolbarButton("효과음 설정", 615, 92);
             this.btnSoundSettings.Click += delegate { OpenSoundSettingsDialog(); };
 
             this.cmbThemeSelect = new ComboBox
             {
                 DropDownStyle = ComboBoxStyle.DropDownList,
-                Location = new Point(744, 5),
+                Location = new Point(713, 5),
                 Width = 145,
                 Font = new Font("맑은 고딕", 9f)
             };
@@ -708,18 +708,18 @@ namespace NyaaChatNative
                 }
             };
 
-            this.btnOpenFolder = CreateToolbarButton("📁 개조폴더", 895, 86);
+            this.btnOpenFolder = CreateToolbarButton("폴더 열기", 864, 80);
             this.btnOpenFolder.Click += delegate { OpenSubFolder(""); };
 
-            this.btnPinTop = CreateToolbarButton(this.TopMost ? "📌 고정됨" : "📌 창고정", 987, 74);
+            this.btnPinTop = CreateToolbarButton(this.TopMost ? "[고정됨]" : "창고정", 950, 70);
             this.btnPinTop.Click += delegate
             {
                 this.TopMost = !this.TopMost;
-                this.btnPinTop.Text = this.TopMost ? "📌 고정됨" : "📌 창고정";
+                this.btnPinTop.Text = this.TopMost ? "[고정됨]" : "창고정";
                 SetIniValue("Window", "AlwaysOnTop", this.TopMost ? "true" : "false", true);
             };
 
-            this.btnBossHide = CreateToolbarButton("🕶️ 숨김(Alt+Q)", 1066, 98);
+            this.btnBossHide = CreateToolbarButton("숨김(Alt+Q)", 1026, 92);
             this.btnBossHide.Click += delegate { ToggleWindowVisibility(); };
 
             this.topToolbar.Controls.AddRange(new Control[] {
@@ -750,7 +750,7 @@ namespace NyaaChatNative
             this.leftHeaderPanel = new Panel { Dock = DockStyle.Top, Height = 34 };
             this.lblLeftTitle = new Label
             {
-                Text = "📡 접속 서버 및 채널 트리",
+                Text = "접속 서버 및 채널 트리",
                 Location = new Point(8, 8),
                 AutoSize = true,
                 Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
@@ -783,11 +783,11 @@ namespace NyaaChatNative
             this.treeServersChannels.NodeMouseDoubleClick += OnTreeServersNodeDoubleClick;
 
             ContextMenuStrip treeMenu = new ContextMenuStrip();
-            treeMenu.Items.Add("✏️ 채널 토픽 및 모드 설정 (/topic · /mode)", null, delegate { PromptEditChannelTopic(); });
-            treeMenu.Items.Add("➕ 새 채널 개설 / 입장 (/join)", null, delegate { PromptJoinChannelOnActiveServer(); });
-            treeMenu.Items.Add("🌐 네트워크 서버 & 채널 리스트 (F2)", null, delegate { OpenServerListExplorer(); });
+            treeMenu.Items.Add("채널 토픽 및 모드 설정 (/topic · /mode)", null, delegate { PromptEditChannelTopic(); });
+            treeMenu.Items.Add("새 채널 개설 / 입장 (/join)", null, delegate { PromptJoinChannelOnActiveServer(); });
+            treeMenu.Items.Add("네트워크 서버 & 채널 리스트 (F2)", null, delegate { OpenServerListExplorer(); });
             treeMenu.Items.Add(new ToolStripSeparator());
-            treeMenu.Items.Add("🚪 현재 채널에서 퇴장 (/part)", null, delegate { ExecuteSlashCommand("/part"); });
+            treeMenu.Items.Add("현재 채널에서 퇴장 (/part)", null, delegate { ExecuteSlashCommand("/part"); });
             this.treeServersChannels.ContextMenuStrip = treeMenu;
 
             this.mainOuterSplit.Panel1.Controls.Add(this.treeServersChannels);
@@ -797,7 +797,7 @@ namespace NyaaChatNative
             this.channelHeaderBar = new Panel { Dock = DockStyle.Top, Height = 52 };
             this.lblChannelTopicHeader = new Label
             {
-                Text = "#자유대화   [🌐 서버 연결 대기 중]",
+                Text = "#자유대화   [서버 연결 대기 중]",
                 Location = new Point(12, 6),
                 AutoSize = true,
                 Font = new Font("맑은 고딕", 11f, FontStyle.Bold)
@@ -812,10 +812,10 @@ namespace NyaaChatNative
 
             this.btnChannelTopicEdit = new Button
             {
-                Text = "✏️ 토픽/모드",
-                Size = new Size(88, 24),
+                Text = "토픽/모드",
+                Size = new Size(80, 24),
                 Anchor = AnchorStyles.Top | AnchorStyles.Right,
-                Location = new Point(480, 12),
+                Location = new Point(488, 12),
                 FlatStyle = FlatStyle.Flat,
                 Font = new Font("맑은 고딕", 8.5f, FontStyle.Bold),
                 Cursor = Cursors.Hand
@@ -824,8 +824,8 @@ namespace NyaaChatNative
 
             this.btnReport112 = new Button
             {
-                Text = "🚨 신고(/112)",
-                Size = new Size(86, 24),
+                Text = "신고(/112)",
+                Size = new Size(80, 24),
                 Anchor = AnchorStyles.Top | AnchorStyles.Right,
                 Location = new Point(574, 12),
                 FlatStyle = FlatStyle.Flat,
@@ -914,7 +914,7 @@ namespace NyaaChatNative
             this.rightHeaderPanel = new Panel { Dock = DockStyle.Top, Height = 34 };
             this.lblRightUsersTitle = new Label
             {
-                Text = "👥 현재 채널 참여자 (0명)",
+                Text = "현재 채널 참여자 (0명)",
                 Location = new Point(8, 8),
                 AutoSize = true,
                 Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
@@ -933,7 +933,7 @@ namespace NyaaChatNative
             {
                 if (this.lstOnlineUsers.SelectedItem == null) return "";
                 string raw = Convert.ToString(this.lstOnlineUsers.SelectedItem);
-                return Regex.Replace(raw, @"^[\s👑@\^\+]+", "").Replace(" (나)", "").Trim();
+                return Regex.Replace(raw, @"^[\s\*@\^\+]+", "").Replace(" (나)", "").Trim();
             };
             this.lstOnlineUsers.MouseDown += delegate (object s, MouseEventArgs e)
             {
@@ -956,44 +956,44 @@ namespace NyaaChatNative
             };
 
             ContextMenuStrip userMenu = new ContextMenuStrip();
-            userMenu.Items.Add("🔍 사용자 정보 조회 (/whois)", null, delegate
+            userMenu.Items.Add("사용자 정보 조회 (/whois)", null, delegate
             {
                 string n = getSelectedUserCleanNick();
                 if (!string.IsNullOrEmpty(n)) ExecuteSlashCommand("/whois " + n);
             });
-            userMenu.Items.Add("✉️ 현재 채널로 초대 (/invite)", null, delegate
+            userMenu.Items.Add("현재 채널로 초대 (/invite)", null, delegate
             {
                 string n = getSelectedUserCleanNick();
                 if (!string.IsNullOrEmpty(n)) ExecuteSlashCommand("/invite " + n);
             });
             userMenu.Items.Add(new ToolStripSeparator());
-            userMenu.Items.Add("👑 방장(@) 권한 부여 (/op)", null, delegate
+            userMenu.Items.Add("방장(@) 권한 부여 (/op)", null, delegate
             {
                 string n = getSelectedUserCleanNick();
                 if (!string.IsNullOrEmpty(n)) ExecuteSlashCommand("/op " + n);
             });
-            userMenu.Items.Add("👑 방장(@) 권한 회수 (/deop)", null, delegate
+            userMenu.Items.Add("방장(@) 권한 회수 (/deop)", null, delegate
             {
                 string n = getSelectedUserCleanNick();
                 if (!string.IsNullOrEmpty(n)) ExecuteSlashCommand("/deop " + n);
             });
-            userMenu.Items.Add("🗣️ 발언권(+v) 부여 (/mode +v)", null, delegate
+            userMenu.Items.Add("발언권(+v) 부여 (/mode +v)", null, delegate
             {
                 string n = getSelectedUserCleanNick();
                 if (!string.IsNullOrEmpty(n)) ExecuteSlashCommand("/mode " + this.ActiveRoomId + " +v " + n);
             });
-            userMenu.Items.Add("🔇 발언권(-v) 회수 (/mode -v)", null, delegate
+            userMenu.Items.Add("발언권(-v) 회수 (/mode -v)", null, delegate
             {
                 string n = getSelectedUserCleanNick();
                 if (!string.IsNullOrEmpty(n)) ExecuteSlashCommand("/mode " + this.ActiveRoomId + " -v " + n);
             });
             userMenu.Items.Add(new ToolStripSeparator());
-            userMenu.Items.Add("🚪 채널에서 강퇴 (/kick)", null, delegate
+            userMenu.Items.Add("채널에서 강퇴 (/kick)", null, delegate
             {
                 string n = getSelectedUserCleanNick();
                 if (!string.IsNullOrEmpty(n)) ExecuteSlashCommand("/kick " + n);
             });
-            userMenu.Items.Add("⛔ 서버 영구 차단 (/ban · 서버관리자)", null, delegate
+            userMenu.Items.Add("서버 영구 차단 (/ban · 서버관리자)", null, delegate
             {
                 string n = getSelectedUserCleanNick();
                 if (!string.IsNullOrEmpty(n)) ExecuteSlashCommand("/ban " + n);
@@ -1139,7 +1139,7 @@ namespace NyaaChatNative
 
             using (Form dlg = new Form())
             {
-                dlg.Text = "Nyaa Chat - 접속 설정 (순수 네이티브 초경량 클라이언트)";
+                dlg.Text = "Nyaa Chat - 접속 설정";
                 dlg.Size = new Size(440, 340);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
@@ -1150,7 +1150,7 @@ namespace NyaaChatNative
 
                 Label lblWelcome = new Label
                 {
-                    Text = "🐾 Nyaa Chat 멀티서버 클라이언트에 오신 것을 환영합니다!",
+                    Text = "Nyaa Chat 멀티서버 클라이언트 접속 설정",
                     Location = new Point(20, 18),
                     AutoSize = true,
                     Font = new Font("맑은 고딕", 10f, FontStyle.Bold),
@@ -1211,7 +1211,7 @@ namespace NyaaChatNative
 
                 Button btnStart = new Button
                 {
-                    Text = "⚡ 채팅방 입장하기",
+                    Text = "채팅방 입장하기",
                     Location = new Point(20, 244),
                     Size = new Size(380, 38),
                     FlatStyle = FlatStyle.Flat,
@@ -1799,7 +1799,7 @@ namespace NyaaChatNative
             {
                 string keyword = rule[0];
                 string action = rule[1];
-                string val = ExpandScriptVariables(rule[2], session, roomId, "");
+                string val = ExpandScriptVariables(rule[2], session, roomId, content);
 
                 if (!string.IsNullOrEmpty(keyword) && content.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0)
                 {
@@ -1819,6 +1819,14 @@ namespace NyaaChatNative
                             { "content", val },
                             { "type", "text" }
                         });
+                    }
+                    else if (action == "EXEC" || action == "EXEC_SAY")
+                    {
+                        RunExternalScriptCommandAsync(session, roomId, val, true);
+                    }
+                    else if (action == "EXEC_NOTICE")
+                    {
+                        RunExternalScriptCommandAsync(session, roomId, val, false);
                     }
                 }
             }
@@ -1856,7 +1864,7 @@ namespace NyaaChatNative
 
             foreach (NyaaServerSession s in this.Sessions.Values)
             {
-                string connIcon = s.IsConnected ? "🟢" : "⚪";
+                string connIcon = s.IsConnected ? "●" : "○";
                 string srvLabel = string.Format("{0} {1} ({2})", connIcon, s.ServerName, s.Host);
                 TreeNode srvNode = new TreeNode(srvLabel)
                 {
@@ -1982,7 +1990,7 @@ namespace NyaaChatNative
                 modesBadge,
                 this.ActiveSession.ServerName
             );
-            this.lblChannelSubTopic.Text = "📌 토픽: " + topic + "  (클릭/우클릭으로 토픽·모드 설정)";
+            this.lblChannelSubTopic.Text = "토픽: " + topic + "  (클릭/우클릭으로 토픽·모드 설정)";
             this.Text = string.Format("{0} @ {1} - Nyaa Chat Native", this.ActiveRoomId, this.ActiveSession.ServerName);
 
             // Rebuild Per-Server Extended Commands & Module Bar
@@ -1997,7 +2005,7 @@ namespace NyaaChatNative
             {
                 Label badge = new Label
                 {
-                    Text = string.Format("🧩 [{0} 전용 확장]:", this.ActiveSession.ServerName),
+                    Text = string.Format("[{0} 전용 확장]:", this.ActiveSession.ServerName),
                     AutoSize = true,
                     ForeColor = this.ColTextSystem,
                     Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
@@ -2165,7 +2173,7 @@ namespace NyaaChatNative
 
             if (this.ActiveSession == null)
             {
-                this.lblRightUsersTitle.Text = "👥 참여자 (0명)";
+                this.lblRightUsersTitle.Text = "참여자 (0명)";
                 this.lstOnlineUsers.EndUpdate();
                 return;
             }
@@ -2189,12 +2197,12 @@ namespace NyaaChatNative
                 count++;
 
                 bool isOp = activeCh != null && activeCh.Operators.Contains(u.UserId);
-                string prefix = u.IsBot ? "^" : (u.IsServerOper ? "👑" : (isOp ? "@" : "  "));
+                string prefix = u.IsBot ? "^" : (u.IsServerOper ? "*" : (isOp ? "@" : "  "));
                 string meSuffix = string.Equals(u.UserId, this.ActiveSession.MyUserId, StringComparison.OrdinalIgnoreCase) ? " (나)" : "";
                 this.lstOnlineUsers.Items.Add(string.Format("{0}{1}{2}", prefix, u.Nickname, meSuffix));
             }
 
-            this.lblRightUsersTitle.Text = string.Format("👥 참여자 ({0}명)", count);
+            this.lblRightUsersTitle.Text = string.Format("참여자 ({0}명)", count);
             this.lstOnlineUsers.EndUpdate();
         }
 
@@ -2571,9 +2579,12 @@ namespace NyaaChatNative
             if (this.CustomCommandRules.ContainsKey(cmd))
             {
                 string[] rule = this.CustomCommandRules[cmd];
+                string mode = (rule[0] ?? "SAY").Trim().ToUpperInvariant();
                 string expanded = ExpandScriptVariables(rule[1], this.ActiveSession, this.ActiveRoomId, restText);
-                if (rule[0] == "NOTICE") AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, "* " + expanded);
-                else if (rule[0] == "ACTION") ExecuteSlashCommand("/me " + expanded);
+                if (mode == "NOTICE") AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, "* " + expanded);
+                else if (mode == "ACTION") ExecuteSlashCommand("/me " + expanded);
+                else if (mode == "EXEC" || mode == "EXEC_SAY") RunExternalScriptCommandAsync(this.ActiveSession, this.ActiveRoomId, expanded, true);
+                else if (mode == "EXEC_NOTICE") RunExternalScriptCommandAsync(this.ActiveSession, this.ActiveRoomId, expanded, false);
                 else SendChatMessageOnActiveSession(expanded);
                 return;
             }
@@ -2605,7 +2616,77 @@ namespace NyaaChatNative
             string expanded = ExpandScriptVariables(tpl, this.ActiveSession, this.ActiveRoomId, restText);
             if (mode == "NOTICE") AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, "* " + expanded);
             else if (mode == "ACTION") ExecuteSlashCommand("/me " + expanded);
+            else if (mode == "EXEC" || mode == "EXEC_SAY") RunExternalScriptCommandAsync(this.ActiveSession, this.ActiveRoomId, expanded, true);
+            else if (mode == "EXEC_NOTICE") RunExternalScriptCommandAsync(this.ActiveSession, this.ActiveRoomId, expanded, false);
             else SendChatMessageOnActiveSession(expanded);
+        }
+
+        private void RunExternalScriptCommandAsync(NyaaServerSession session, string roomId, string commandLine, bool sendAsChat)
+        {
+            if (session == null || string.IsNullOrEmpty(commandLine)) return;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    ProcessStartInfo psi = new ProcessStartInfo
+                    {
+                        FileName = "cmd.exe",
+                        Arguments = "/c " + commandLine,
+                        WorkingDirectory = this.BaseDir,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        CreateNoWindow = true,
+                        StandardOutputEncoding = Encoding.UTF8
+                    };
+                    psi.EnvironmentVariables["NYAA_ME"] = session.MyNickname ?? "";
+                    psi.EnvironmentVariables["NYAA_CHAN"] = roomId ?? "#자유대화";
+                    psi.EnvironmentVariables["NYAA_SERVER"] = session.ServerName ?? "";
+                    psi.EnvironmentVariables["NYAA_HOST"] = session.Host ?? "";
+
+                    using (Process proc = Process.Start(psi))
+                    {
+                        string output = proc.StandardOutput.ReadToEnd();
+                        proc.WaitForExit(8000);
+                        if (!string.IsNullOrEmpty(output))
+                        {
+                            string[] lines = output.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                            this.BeginInvoke((MethodInvoker)delegate
+                            {
+                                foreach (string line in lines)
+                                {
+                                    string clean = line.Trim();
+                                    if (string.IsNullOrEmpty(clean)) continue;
+                                    if (!sendAsChat)
+                                    {
+                                        AppendSystemMessageToSession(session, roomId, "* " + clean);
+                                    }
+                                    else if (clean.StartsWith("/"))
+                                    {
+                                        ExecuteSlashCommand(clean);
+                                    }
+                                    else
+                                    {
+                                        session.Emit("send_message", new Dictionary<string, object>
+                                        {
+                                            { "roomId", roomId },
+                                            { "content", clean },
+                                            { "type", "text" }
+                                        });
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    this.BeginInvoke((MethodInvoker)delegate
+                    {
+                        AppendSystemMessageToSession(session, roomId, "* [스크립트 실행 오류]: " + ex.Message);
+                    });
+                }
+            });
         }
 
         private string ExpandScriptVariables(string template, NyaaServerSession session, string roomId, string argsText)
@@ -2654,7 +2735,7 @@ namespace NyaaChatNative
             sb.AppendLine("• /112 : 불법/유해 정보 신고  |  /export : 로그 폴더 열기  |  /clear : 화면 지우기");
             if (this.ActiveSession != null && this.ActiveSession.IsMeServerOper)
             {
-                sb.AppendLine("---------------- [ 👑 서버 총괄 관리자(/oper) 전용 명령어 ] ----------------");
+                sb.AppendLine("---------------- [ 서버 총괄 관리자(/oper) 전용 명령어 ] ----------------");
                 sb.AppendLine("• /servername <이름> : 이 서버의 표시 이름 변경 (예: A서버, C서버)");
                 sb.AppendLine("• /serverurl <https://주소> : 이 서버의 공식 외부 접속 주소 설정");
                 sb.AppendLine("• /peer add <https://이웃서버주소> : 수동 화이트리스트에 이웃 서버 등록 및 즉시 동기화");
@@ -2663,7 +2744,7 @@ namespace NyaaChatNative
             }
             if (this.ActiveSession != null && this.ActiveSession.ServerExtendedCommands.Count > 0)
             {
-                sb.AppendFormat("---------------- [ 🧩 현재 서버({0}) 전용 확장 명령어 ] ----------------\r\n", this.ActiveSession.ServerName);
+                sb.AppendFormat("---------------- [ 현재 서버({0}) 전용 확장 명령어 ] ----------------\r\n", this.ActiveSession.ServerName);
                 foreach (ServerExtCommand c in this.ActiveSession.ServerExtendedCommands)
                 {
                     sb.AppendFormat("• {0} : {1}\r\n", c.Cmd, c.Desc);
@@ -2674,7 +2755,7 @@ namespace NyaaChatNative
         }
 
         // ====================================================================
-        // [🌐 서버 리스트 (F2)] Multi-Server & Channel Double-Click Explorer!
+        // [서버 리스트 (F2)] Multi-Server & Channel Double-Click Explorer!
         // ====================================================================
         public void OpenServerListExplorer()
         {
@@ -2701,7 +2782,7 @@ namespace NyaaChatNative
         {
             using (Form dlg = new Form())
             {
-                dlg.Text = "➕ 다른 서버 동시 접속 (/server -m)";
+                dlg.Text = "다른 서버 동시 접속 (/server -m)";
                 dlg.Size = new Size(420, 210);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
@@ -2716,7 +2797,7 @@ namespace NyaaChatNative
 
                 Button bOk = new Button
                 {
-                    Text = "⚡ 새 서버창으로 동시 접속",
+                    Text = "새 서버창으로 동시 접속",
                     Location = new Point(16, 132),
                     Size = new Size(370, 32),
                     FlatStyle = FlatStyle.Flat,
@@ -2742,7 +2823,7 @@ namespace NyaaChatNative
             if (session == null || string.IsNullOrEmpty(channelId)) return;
             using (Form dlg = new Form())
             {
-                dlg.Text = string.Format("🔒 [{0}] 채널 비밀번호 입력", channelId);
+                dlg.Text = string.Format("[{0}] 채널 비밀번호 입력", channelId);
                 dlg.Size = new Size(380, 195);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
@@ -2768,7 +2849,7 @@ namespace NyaaChatNative
 
                 Button bOk = new Button
                 {
-                    Text = "🔓 비밀번호로 입장",
+                    Text = "비밀번호로 입장",
                     Location = new Point(16, 114),
                     Size = new Size(220, 32),
                     FlatStyle = FlatStyle.Flat,
@@ -2814,7 +2895,7 @@ namespace NyaaChatNative
             if (this.ActiveSession == null) return;
             using (Form dlg = new Form())
             {
-                dlg.Text = string.Format("➕ [{0}] 새 채널 개설 / 입장", this.ActiveSession.ServerName);
+                dlg.Text = string.Format("[{0}] 새 채널 개설 / 입장", this.ActiveSession.ServerName);
                 dlg.Size = new Size(440, 360);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
@@ -2836,9 +2917,9 @@ namespace NyaaChatNative
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary
                 };
-                cbVis.Items.Add("🌐 공개 채널 (기본 - 목록 및 토픽 전체 공개)");
-                cbVis.Items.Add("🔒 비공개 채널 (+p : 채널 목록에서 토픽 숨김)");
-                cbVis.Items.Add("🕵️ 비밀 채널 (+s : /list 및 좌측 채널 목록에서 완전 숨김)");
+                cbVis.Items.Add("공개 채널 (기본 - 목록 및 토픽 전체 공개)");
+                cbVis.Items.Add("비공개 채널 (+p : 채널 목록에서 토픽 숨김)");
+                cbVis.Items.Add("비밀 채널 (+s : /list 및 좌측 채널 목록에서 완전 숨김)");
                 cbVis.SelectedIndex = 0;
 
                 Label lKey = new Label { Text = "채널 비밀번호 (+k, 선택):", Location = new Point(16, 190), AutoSize = true };
@@ -2858,7 +2939,7 @@ namespace NyaaChatNative
 
                 Label lHint = new Label
                 {
-                    Text = "💡 처음 개설하는 채널이면 귀하에게 자동으로 방장(@) 권한이 부여됩니다.",
+                    Text = "* 처음 개설하는 채널이면 귀하에게 자동으로 방장(@) 권한이 부여됩니다.",
                     Location = new Point(16, 248),
                     AutoSize = true,
                     ForeColor = this.ColTextTimestamp
@@ -2866,7 +2947,7 @@ namespace NyaaChatNative
 
                 Button bOk = new Button
                 {
-                    Text = "🚀 채널 개설 / 입장하기",
+                    Text = "채널 개설 / 입장하기",
                     Location = new Point(16, 276),
                     Size = new Size(390, 34),
                     FlatStyle = FlatStyle.Flat,
@@ -2913,7 +2994,7 @@ namespace NyaaChatNative
 
             using (Form dlg = new Form())
             {
-                dlg.Text = string.Format("✏️ {0} ({1}) 토픽 및 채널 모드 설정", this.ActiveRoomId, this.ActiveSession.ServerName);
+                dlg.Text = string.Format("{0} ({1}) 토픽 및 채널 모드 설정", this.ActiveRoomId, this.ActiveSession.ServerName);
                 dlg.Size = new Size(460, 445);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
@@ -2925,19 +3006,19 @@ namespace NyaaChatNative
                     Text = string.Format("현재 채널: {0}   |   현재 모드: [{1}]   |   내 권한: {2}",
                         this.ActiveRoomId,
                         currentModes,
-                        isMyOp ? "👑 방장(@) / 관리자" : "일반 참여자"),
+                        isMyOp ? "방장(@) / 관리자" : "일반 참여자"),
                     Location = new Point(16, 14),
                     AutoSize = true,
                     ForeColor = this.ColTextSystem,
                     Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold)
                 };
 
-                Label lTopic = new Label { Text = "📌 채널 토픽 (방 주제):", Location = new Point(16, 42), AutoSize = true, Font = new Font("맑은 고딕", 9f, FontStyle.Bold) };
+                Label lTopic = new Label { Text = "채널 토픽 (방 주제):", Location = new Point(16, 42), AutoSize = true, Font = new Font("맑은 고딕", 9f, FontStyle.Bold) };
                 TextBox tTopic = new TextBox { Text = currentTopic, Location = new Point(16, 64), Width = 410, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
 
                 GroupBox grpModes = new GroupBox
                 {
-                    Text = "⚙️ 채널 모드 및 보안 설정 (방장 @ 또는 서버 관리자 권한 필요)",
+                    Text = "채널 모드 및 보안 설정 (방장 @ 또는 서버 관리자 권한 필요)",
                     Location = new Point(16, 100),
                     Size = new Size(410, 245),
                     ForeColor = this.ColTextPrimary
@@ -2952,9 +3033,9 @@ namespace NyaaChatNative
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary
                 };
-                cbVis.Items.Add("🌐 공개 채널 (-p -s : 누구나 목록에서 볼 수 있음)");
-                cbVis.Items.Add("🔒 비공개 채널 (+p : 채널 목록에서 토픽을 숨김)");
-                cbVis.Items.Add("🕵️ 비밀 채널 (+s : 채널 목록에서 채널 자체를 숨김)");
+                cbVis.Items.Add("공개 채널 (-p -s : 누구나 목록에서 볼 수 있음)");
+                cbVis.Items.Add("비공개 채널 (+p : 채널 목록에서 토픽을 숨김)");
+                cbVis.Items.Add("비밀 채널 (+s : 채널 목록에서 채널 자체를 숨김)");
                 if (chInfo != null && chInfo.IsSecret) cbVis.SelectedIndex = 2;
                 else if (chInfo != null && chInfo.IsPrivate) cbVis.SelectedIndex = 1;
                 else cbVis.SelectedIndex = 0;
@@ -2983,21 +3064,21 @@ namespace NyaaChatNative
 
                 CheckBox chkT = new CheckBox
                 {
-                    Text = "🔒 방장(@)만 토픽 변경 가능 (+t 모드)",
+                    Text = "방장(@)만 토픽 변경 가능 (+t 모드)",
                     Location = new Point(14, 142),
                     AutoSize = true,
                     Checked = chInfo == null || chInfo.IsTopicProtected
                 };
                 CheckBox chkM = new CheckBox
                 {
-                    Text = "🔇 발언권 제어 채널 (+m 모드 : @방장 및 +v 유저만 채팅 가능)",
+                    Text = "발언권 제어 채널 (+m 모드 : @방장 및 +v 유저만 채팅 가능)",
                     Location = new Point(14, 170),
                     AutoSize = true,
                     Checked = chInfo != null && chInfo.IsModerated
                 };
                 CheckBox chkI = new CheckBox
                 {
-                    Text = "✉️ 초대 전용 채널 (+i 모드 : /invite 받은 유저만 입장 가능)",
+                    Text = "초대 전용 채널 (+i 모드 : /invite 받은 유저만 입장 가능)",
                     Location = new Point(14, 198),
                     AutoSize = true,
                     Checked = chInfo != null && chInfo.IsInviteOnly
@@ -3007,7 +3088,7 @@ namespace NyaaChatNative
 
                 Button bOk = new Button
                 {
-                    Text = "💾 토픽 및 채널 모드 저장",
+                    Text = "토픽 및 채널 모드 저장",
                     Location = new Point(16, 358),
                     Size = new Size(300, 34),
                     FlatStyle = FlatStyle.Flat,
@@ -3071,7 +3152,7 @@ namespace NyaaChatNative
 
             using (Form dlg = new Form())
             {
-                dlg.Text = "🚨 유해/불법 메시지 신고 (/112)";
+                dlg.Text = "유해/불법 메시지 신고 (/112)";
                 dlg.Size = new Size(460, 320);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
@@ -3092,7 +3173,7 @@ namespace NyaaChatNative
 
                 Button bSubmit = new Button
                 {
-                    Text = "🚨 신고 접수",
+                    Text = "신고 접수",
                     Location = new Point(16, 242),
                     Size = new Size(410, 32),
                     FlatStyle = FlatStyle.Flat,
@@ -3111,7 +3192,7 @@ namespace NyaaChatNative
                             { "reason", tReason.Text.Trim() },
                             { "details", tReason.Text.Trim() }
                         });
-                        AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, "* 🚨 신고가 정상적으로 서버 관리자에게 접수되었습니다.");
+                        AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, "* 신고가 정상적으로 서버 관리자에게 접수되었습니다.");
                         dlg.Close();
                     }
                 };
@@ -3127,7 +3208,7 @@ namespace NyaaChatNative
         {
             Form dlg = new Form
             {
-                Text = "🛠️ Nyaa Chat 내장 스크립트 / 테마 / 모듈 편집기 (Alt+R)",
+                Text = "Nyaa Chat 내장 스크립트 / 테마 / 모듈 편집기 (Alt+R)",
                 Size = new Size(760, 540),
                 StartPosition = FormStartPosition.CenterParent,
                 BackColor = this.ColBgWindow,
@@ -3151,7 +3232,7 @@ namespace NyaaChatNative
             Label lblStatus = new Label { Text = "파일을 수정한 뒤 [저장 및 즉시 적용 (Ctrl+S)]을 누르면 재시작 없이 반영됩니다.", Location = new Point(10, 12), AutoSize = true, ForeColor = this.ColTextSecondary };
             Button btnSave = new Button
             {
-                Text = "💾 저장 및 즉시 적용 (Ctrl+S)",
+                Text = "저장 및 즉시 적용 (Ctrl+S)",
                 Size = new Size(190, 30),
                 Location = new Point(540, 6),
                 Anchor = AnchorStyles.Top | AnchorStyles.Right,
@@ -3169,7 +3250,7 @@ namespace NyaaChatNative
                 currentRelPath = rel;
                 string full = Path.Combine(this.BaseDir, rel.Replace('/', '\\'));
                 editor.Text = File.Exists(full) ? File.ReadAllText(full, Encoding.UTF8) : "";
-                lblStatus.Text = "📄 현재 편집 중: " + rel;
+                lblStatus.Text = "현재 편집 중: " + rel;
             };
 
             Action saveCurrentFile = delegate
@@ -3181,7 +3262,7 @@ namespace NyaaChatNative
                 ApplyThemeColorsToUI();
                 UpdateHeaderAndModuleBar();
                 RedrawActiveChatHistory();
-                lblStatus.Text = "✅ [" + currentRelPath + "] 저장 및 실시간 반영 완료! (" + DateTime.Now.ToString("HH:mm:ss") + ")";
+                lblStatus.Text = "[" + currentRelPath + "] 저장 및 실시간 반영 완료 (" + DateTime.Now.ToString("HH:mm:ss") + ")";
             };
 
             string activeThemeFile = "themes/" + GetIni("Theme", "ActiveTheme", "default_dark.ini");
@@ -3235,7 +3316,7 @@ namespace NyaaChatNative
         {
             using (Form dlg = new Form())
             {
-                dlg.Text = "🔊 사용자 효과음 연결 설정 (sounds/ 폴더)";
+                dlg.Text = "사용자 효과음 연결 설정 (sounds/ 폴더)";
                 dlg.Size = new Size(500, 360);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
@@ -3244,7 +3325,7 @@ namespace NyaaChatNative
 
                 Label lblNotice = new Label
                 {
-                    Text = "📌 기본 배포판에는 소리/영상 파일이 포함되지 않습니다.\r\n원하시는 .wav 효과음 파일을 sounds/ 폴더에 넣으신 후 상황별로 연결하세요.",
+                    Text = "[안내] 기본 배포판에는 소리/영상 파일이 포함되지 않습니다.\r\n원하시는 .wav 효과음 파일을 sounds/ 폴더에 넣으신 후 상황별로 연결하세요.",
                     Location = new Point(16, 14),
                     Size = new Size(450, 38),
                     ForeColor = this.ColTextSecondary
@@ -3252,7 +3333,7 @@ namespace NyaaChatNative
 
                 Button btnOpenSounds = new Button
                 {
-                    Text = "📂 sounds/ 폴더 열기",
+                    Text = "sounds/ 폴더 열기",
                     Location = new Point(16, 56),
                     Size = new Size(150, 26),
                     FlatStyle = FlatStyle.Flat,
@@ -3280,10 +3361,10 @@ namespace NyaaChatNative
 
                 string[] soundFiles = GetUserSoundFiles();
                 string[][] rows = new string[][] {
-                    new string[] { "🔔 내 닉네임 호출(멘션):", "SoundMention" },
-                    new string[] { "💬 일반 메시지 수신:", "SoundMessage" },
-                    new string[] { "🚪 채널 입/퇴장 알림:", "SoundJoin" },
-                    new string[] { "🚨 시스템 경고 알림:", "SoundAlert" }
+                    new string[] { "내 닉네임 호출(멘션):", "SoundMention" },
+                    new string[] { "일반 메시지 수신:", "SoundMessage" },
+                    new string[] { "채널 입/퇴장 알림:", "SoundJoin" },
+                    new string[] { "시스템 경고 알림:", "SoundAlert" }
                 };
 
                 ComboBox[] combos = new ComboBox[rows.Length];
@@ -3330,7 +3411,7 @@ namespace NyaaChatNative
 
                 Button btnSave = new Button
                 {
-                    Text = "💾 효과음 설정 저장 (settings.ini)",
+                    Text = "효과음 설정 저장 (settings.ini)",
                     Location = new Point(16, 276),
                     Size = new Size(452, 34),
                     FlatStyle = FlatStyle.Flat,
@@ -3526,8 +3607,8 @@ namespace NyaaChatNative
         {
             this.trayMenu = new ContextMenuStrip();
             this.trayMenu.Items.Add("창 열기 / 숨기기 (Alt+Q)", null, delegate { ToggleWindowVisibility(); });
-            this.trayMenu.Items.Add("🌐 서버 리스트 탐색 (F2)", null, delegate { OpenServerListExplorer(); });
-            this.trayMenu.Items.Add("🛠️ 스크립트 편집기 (Alt+R)", null, delegate { OpenScriptEditorDialog("aliases.txt"); });
+            this.trayMenu.Items.Add("서버 리스트 탐색 (F2)", null, delegate { OpenServerListExplorer(); });
+            this.trayMenu.Items.Add("스크립트 편집기 (Alt+R)", null, delegate { OpenScriptEditorDialog("aliases.txt"); });
             this.trayMenu.Items.Add(new ToolStripSeparator());
             this.trayMenu.Items.Add("종료 (Exit)", null, delegate
             {
@@ -3720,7 +3801,7 @@ namespace NyaaChatNative
     }
 
     // ========================================================================
-    // [🌐 서버 리스트 (F2)] Explorer Dialog:
+    // [서버 리스트 (F2)] Explorer Dialog:
     // 1. Upper List: Known Whitelisted Servers (A서버, B서버, C서버...)
     // 2. Double-Click C서버 -> Populates C서버's Public Channels in Lower List!
     // 3. Double-Click #소드걸스 -> Opens a Simultaneous Connection to C서버 #소드걸스!
@@ -3739,7 +3820,7 @@ namespace NyaaChatNative
         public ServerListForm(MainForm owner)
         {
             this.mainForm = owner;
-            this.Text = "🌐 Nyaa Chat 네트워크 서버 리스트 & 공개 채널 탐색기 (화이트리스트 연동)";
+            this.Text = "Nyaa Chat 네트워크 서버 리스트 & 공개 채널 탐색기 (F2)";
             this.Size = new Size(780, 560);
             this.StartPosition = FormStartPosition.CenterParent;
             this.BackColor = owner.ColBgWindow;
@@ -3747,8 +3828,8 @@ namespace NyaaChatNative
 
             Label lblTopGuide = new Label
             {
-                Text = "💡 [사용법] ① 위쪽 목록에서 서버(예: C서버)를 더블클릭하면 아래에 그 서버의 공개 채널 목록이 펼쳐집니다.\r\n" +
-                       "             ② 아래쪽 채널(예: #소드걸스)을 더블클릭하면 현재 서버 연결을 유지한 채 해당 서버 채널로 동시 접속합니다!",
+                Text = "[사용법] 1. 위쪽 목록에서 서버를 선택하거나 더블클릭하면 아래에 해당 서버의 공개 채널 목록이 표시됩니다.\r\n" +
+                       "         2. 아래쪽 채널을 더블클릭하면 현재 서버 연결을 유지한 채 해당 서버 채널로 동시 접속합니다.",
                 Location = new Point(14, 10),
                 Size = new Size(620, 36),
                 Font = new Font("맑은 고딕", 9f, FontStyle.Bold),
@@ -3757,7 +3838,7 @@ namespace NyaaChatNative
 
             Button btnRefresh = new Button
             {
-                Text = "🔄 서버수첩 동기화",
+                Text = "서버목록 갱신",
                 Location = new Point(638, 12),
                 Size = new Size(114, 30),
                 FlatStyle = FlatStyle.Flat,
@@ -3811,7 +3892,7 @@ namespace NyaaChatNative
 
             this.lblSelectedServerTitle = new Label
             {
-                Text = "📂 선택한 서버의 공개 채널 목록 (채널을 더블클릭하면 즉시 동시 접속합니다):",
+                Text = "선택한 서버의 공개 채널 목록 (채널을 더블클릭하면 즉시 동시 접속합니다):",
                 Location = new Point(14, 246),
                 AutoSize = true,
                 Font = new Font("맑은 고딕", 9.5f, FontStyle.Bold),
@@ -3873,7 +3954,7 @@ namespace NyaaChatNative
             };
             Button btnDirectGo = new Button
             {
-                Text = "⚡ 이 서버/채널로 동시 접속",
+                Text = "이 서버/채널로 동시 접속",
                 Location = new Point(556, 7),
                 Size = new Size(172, 28),
                 FlatStyle = FlatStyle.Flat,
@@ -3953,7 +4034,7 @@ namespace NyaaChatNative
 
             foreach (DirectoryServerEntry srv in this.currentServers)
             {
-                string st = srv.IsOnline ? "🟢 온라인" : "⚪ 캐시보관";
+                string st = srv.IsOnline ? "온라인" : "캐시보관";
                 ListViewItem item = new ListViewItem(srv.ServerName);
                 item.SubItems.Add(srv.Host);
                 item.SubItems.Add(st);
@@ -3978,7 +4059,7 @@ namespace NyaaChatNative
             this.selectedServer = srv;
             this.txtDirectUrl.Text = srv.ServerUrl;
             this.lblSelectedServerTitle.Text = string.Format(
-                "📂 [{0} ({1})] 공개 채널 목록 ({2}개) — 채널을 더블클릭하면 새 서버 창으로 동시 접속합니다:",
+                "[{0} ({1})] 공개 채널 목록 ({2}개) — 채널을 더블클릭하면 새 서버 창으로 동시 접속합니다:",
                 srv.ServerName, srv.Host, srv.PublicChannels.Count
             );
 
@@ -3987,7 +4068,7 @@ namespace NyaaChatNative
 
             foreach (ChannelItemInfo ch in srv.PublicChannels)
             {
-                ListViewItem item = new ListViewItem(ch.Name + (ch.HasKey ? " 🔒" : ""));
+                ListViewItem item = new ListViewItem(ch.Name + (ch.HasKey ? " [+k]" : ""));
                 item.SubItems.Add(ch.UserCount + "명");
                 item.SubItems.Add(ch.Modes);
                 item.SubItems.Add(string.IsNullOrEmpty(ch.Topic) ? "(설정된 토픽 없음)" : ch.Topic);
