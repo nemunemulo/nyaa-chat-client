@@ -1,0 +1,10 @@
+﻿# Personal chat logs and user-added sound files
+logs/*
+!logs/README.txt
+sounds/*
+!sounds/README.txt
+
+# OS & Temp files
+*.log
+.DS_Store
+Thumbs.db
