@@ -1752,8 +1752,8 @@ namespace NyaaChatNative
             history.Add(item);
             if (history.Count > 500) history.RemoveAt(0);
 
-            // Save to disk log asynchronously: logs/[ServerName]_#channel_YYYY-MM-DD.txt
-            AppendDiskLogAsync(session.ServerName, roomId, senderNick, content, msgType);
+            // Save to disk log asynchronously: logs/{ServerHost}/[{ServerName}]_#channel_YYYY-MM-DD.txt
+            AppendDiskLogAsync(session, roomId, senderNick, content, msgType);
 
             // Check user_script.txt ON_TEXT triggers
             bool isFromOther = !string.Equals(senderId, session.MyUserId, StringComparison.OrdinalIgnoreCase) && msgType != "system";
@@ -3406,21 +3406,42 @@ namespace NyaaChatNative
         // ====================================================================
         // Utility, Logging, Tray, and INI Methods
         // ====================================================================
-        private void AppendDiskLogAsync(string serverName, string channel, string sender, string content, string type)
+        private void AppendDiskLogAsync(NyaaServerSession session, string channel, string sender, string content, string type)
         {
-            if (GetIni("Logging", "SaveLogs", "true").ToLower() != "true") return;
+            if (session == null || GetIni("Logging", "SaveLogs", "true").ToLower() != "true") return;
+
+            string srvHost = string.IsNullOrEmpty(session.Host) ? "default_server" : session.Host;
+            string srvName = string.IsNullOrEmpty(session.ServerName) ? srvHost : session.ServerName;
 
             ThreadPool.QueueUserWorkItem(delegate
             {
                 try
                 {
-                    string safeSrv = SanitizeFileName(serverName);
+                    string safeHost = SanitizeFileName(srvHost);
+                    string safeSrv = SanitizeFileName(srvName);
                     string safeCh = SanitizeFileName(channel);
                     string dateStr = DateTime.Now.ToString("yyyy-MM-dd");
-                    string logFile = Path.Combine(this.BaseDir, "logs", string.Format("[{0}]_{1}_{2}.txt", safeSrv, safeCh, dateStr));
-                    string line = type == "system"
-                        ? string.Format("[{0:HH:mm:ss}] {1}\r\n", DateTime.Now, content)
-                        : string.Format("[{0:HH:mm:ss}] <{1}> {2}\r\n", DateTime.Now, sender, content);
+
+                    string serverLogDir = Path.Combine(this.BaseDir, "logs", safeHost);
+                    if (!Directory.Exists(serverLogDir))
+                    {
+                        Directory.CreateDirectory(serverLogDir);
+                    }
+
+                    string logFile = Path.Combine(serverLogDir, string.Format("[{0}]_{1}_{2}.txt", safeSrv, safeCh, dateStr));
+                    string line;
+                    if (type == "system")
+                    {
+                        line = string.Format("[{0:HH:mm:ss}] {1}\r\n", DateTime.Now, content);
+                    }
+                    else if (type == "action")
+                    {
+                        line = string.Format("[{0:HH:mm:ss}] * {1} {2}\r\n", DateTime.Now, sender, content);
+                    }
+                    else
+                    {
+                        line = string.Format("[{0:HH:mm:ss}] <{1}> {2}\r\n", DateTime.Now, sender, content);
+                    }
 
                     lock (this.fileLock)
                     {
