@@ -136,6 +136,7 @@ namespace NyaaChatNative
         public bool IsConnected = false;
         public string InitialTargetChannel = "#자유대화";
         public string InitialChannelKey = "";
+        public string NickPassword = "";
 
         public Dictionary<string, ChannelItemInfo> Channels = new Dictionary<string, ChannelItemInfo>(StringComparer.OrdinalIgnoreCase);
         public List<OnlineUserInfo> OnlineUsers = new List<OnlineUserInfo>();
@@ -281,6 +282,10 @@ namespace NyaaChatNative
                 if (!string.IsNullOrEmpty(this.InitialChannelKey))
                 {
                     joinPayload["channelKey"] = this.InitialChannelKey;
+                }
+                if (!string.IsNullOrEmpty(this.NickPassword))
+                {
+                    joinPayload["nickpass"] = this.NickPassword;
                 }
                 Emit("user_join", joinPayload);
                 this.form.BeginInvoke((MethodInvoker)delegate
@@ -662,6 +667,7 @@ namespace NyaaChatNative
         public string ActiveRoomId = "#자유대화";
 
         public string GlobalNickname = "";
+        public string GlobalNickPassword = "";
         public string GlobalUserId = "";
         private int currentOpacityPct = 100;
         private bool isExiting = false;
@@ -797,6 +803,7 @@ namespace NyaaChatNative
                 SetIniValue("User", "UserId", this.GlobalUserId, true);
             }
             this.GlobalNickname = GetIni("User", "DefaultNickname", "");
+            this.GlobalNickPassword = GetIni("User", "NickPassword", "");
 
             BuildNativeUI();
             InitTrayIcon();
@@ -2329,6 +2336,7 @@ namespace NyaaChatNative
 
             // Create brand-new simultaneous server session!
             session = new NyaaServerSession(this, normUrl, this.GlobalNickname, this.GlobalUserId, targetChannel, channelKey);
+            session.NickPassword = this.GlobalNickPassword;
             this.Sessions[normUrl] = session;
             this.ActiveSession = session;
             this.ActiveRoomId = targetChannel;
@@ -3354,7 +3362,8 @@ namespace NyaaChatNative
                     "/clear", "/servers", "/list", "/server", "/export",
                     "/help", "/settings", "/modules", "/theme", "/powershell",
                     "/terminal", "/query", "/msg", "/away", "/back", "/chat",
-                    "/cls", "/restart", "/raw", "/ping", "/112", "/report"
+                    "/cls", "/restart", "/raw", "/ping", "/112", "/report",
+                    "/nickpass", "/identify", "/register", "/unregister"
                 };
 
                 foreach (string c in baseCmds)
@@ -4379,6 +4388,26 @@ namespace NyaaChatNative
                 return;
             }
 
+            // NickServ Authentication & Management (/nickpass, /identify, /register, /unregister)
+            if (cmd == "nickpass" || cmd == "identify" || cmd == "id" || cmd == "register" || cmd == "unregister")
+            {
+                if ((cmd == "nickpass" && parts.Length == 2) || (cmd == "register" && parts.Length >= 2) || (cmd == "identify" && parts.Length >= 2))
+                {
+                    string pass = parts[1];
+                    this.GlobalNickPassword = pass;
+                    SetIniValue("User", "NickPassword", pass, false);
+                    if (this.ActiveSession != null) this.ActiveSession.NickPassword = pass;
+                }
+                else if (cmd == "unregister")
+                {
+                    this.GlobalNickPassword = "";
+                    SetIniValue("User", "NickPassword", "", false);
+                    if (this.ActiveSession != null) this.ActiveSession.NickPassword = "";
+                }
+                SendChatMessageOnActiveSession(trimmed);
+                return;
+            }
+
             // 1. Sacred Core Commands (100% Consistent Across All Servers)
             if (cmd == "servers" || cmd == "serverlist")
             {
@@ -5065,6 +5094,7 @@ namespace NyaaChatNative
                 sb.AppendLine("• /settings (or /config, F10) : Open All-in-One Integrated Settings Center");
                 sb.AppendLine("• /modules (or /module) : Open Server Modules Manager (Add/Import/Toggle/Edit)");
                 sb.AppendLine("• /theme (or /color, /font) : Open Color Palette & Font Customizer");
+                sb.AppendLine("• /nickpass <pass> : Register password | /identify <pass> : Verify protected nick");
                 sb.AppendLine("• /lang [ko|en] : Switch UI language between Korean (ko) and English (en)");
                 if (this.ActiveSession != null && this.ActiveSession.IsMeServerOper)
                 {
@@ -5097,6 +5127,7 @@ namespace NyaaChatNative
                 sb.AppendLine("• /invite <닉네임> : 현재 채널로 초대  |  /op · /deop · /kick <닉네임> : 방장 권한");
                 sb.AppendLine("• /whois <닉네임> : 유저 정보 조회  |  /me <행동> : 행동 묘사");
                 sb.AppendLine("• /112 : 불법/유해 정보 신고  |  /export : 로그 폴더 열기  |  /clear : 화면 지우기");
+                sb.AppendLine("• /nickpass <암호> : 닉네임 비밀번호 등록/변경  |  /identify <암호> : 본인 인증 (사칭 방어)");
                 sb.AppendLine("• /settings (또는 /설정, F10) : 설정창 열기 (간편설정 · 고급설정)");
                 sb.AppendLine("• /modules (또는 /모듈) : 서버별 확장 모듈 추가 · 가져오기 · 켜기/끄기 관리창 열기");
                 sb.AppendLine("• /theme (또는 /color, /font) : 색상 팔레트 · 글꼴 설정창 열기");
@@ -6299,28 +6330,28 @@ namespace NyaaChatNative
                 GroupBox grpProfileAdv = new GroupBox
                 {
                     Location = new Point(16, 318),
-                    Size = new Size(584, 138),
+                    Size = new Size(584, 150),
                     ForeColor = this.ColTextPrimary,
                     Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
                 };
 
-                Label lQuitMsg = new Label { Location = new Point(16, 30), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lQuitMsg = new Label { Location = new Point(16, 26), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
                 TextBox txtQuitMsg = new TextBox
                 {
                     Text = GetIni("User", "QuitMessage", "NyaaChat Native - 좋은 하루 되세요!"),
-                    Location = new Point(172, 26),
+                    Location = new Point(172, 22),
                     Width = 394,
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary,
                     Font = new Font("맑은 고딕", 9f)
                 };
 
-                Label lUserId = new Label { Location = new Point(16, 72), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lUserId = new Label { Location = new Point(16, 64), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
                 TextBox txtUserId = new TextBox
                 {
                     Text = this.GlobalUserId,
                     ReadOnly = true,
-                    Location = new Point(172, 68),
+                    Location = new Point(172, 60),
                     Width = 220,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextSecondary,
@@ -6328,7 +6359,7 @@ namespace NyaaChatNative
                 };
                 Button btnRegenUserId = new Button
                 {
-                    Location = new Point(402, 66),
+                    Location = new Point(402, 58),
                     Size = new Size(164, 27),
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
@@ -6344,8 +6375,27 @@ namespace NyaaChatNative
                     SetIniValue("User", "UserId", this.GlobalUserId, true);
                 };
 
+                Label lNickPass = new Label { Location = new Point(16, 106), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                TextBox txtNickPass = new TextBox
+                {
+                    Text = !string.IsNullOrEmpty(this.GlobalNickPassword) ? this.GlobalNickPassword : GetIni("User", "NickPassword", ""),
+                    PasswordChar = '*',
+                    Location = new Point(172, 102),
+                    Width = 220,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("Consolas", 9.5f)
+                };
+                Label lNickPassHint = new Label
+                {
+                    Location = new Point(402, 104),
+                    Size = new Size(164, 20),
+                    Font = new Font("맑은 고딕", 8.2f),
+                    ForeColor = this.ColTextSecondary
+                };
+
                 grpProfileAdv.Controls.AddRange(new Control[] {
-                    lQuitMsg, txtQuitMsg, lUserId, txtUserId, btnRegenUserId
+                    lQuitMsg, txtQuitMsg, lUserId, txtUserId, btnRegenUserId, lNickPass, txtNickPass, lNickPassHint
                 });
 
                 pageAdvServer.Controls.AddRange(new Control[] { grpServerConn, grpAutoJoin, grpProfileAdv });
@@ -7815,6 +7865,8 @@ namespace NyaaChatNative
                     lQuitMsg.Text = Tr("종료 인사말 (Quit):", "Quit Message:");
                     lUserId.Text = Tr("고유 식별 ID:", "Client User ID:");
                     btnRegenUserId.Text = Tr("새 ID로 재생성", "Regenerate ID");
+                    lNickPass.Text = Tr("닉네임 비밀번호:", "Nick Password:");
+                    lNickPassHint.Text = Tr("(선택적 NickServ 보호)", "(Optional NickServ)");
 
                     // Page 2: Colors & Font
                     grpColors.Text = Tr("클라이언트 16색 상세 팔레트 & 32색 스와치 커스터마이징 (클릭 시 즉시 미리보기)", "16-Slot Color Palette & 32-Swatch Customizer (Live Preview on Click)");
@@ -7966,6 +8018,12 @@ namespace NyaaChatNative
                     }
                     SetIniValue("User", "QuitMessage", txtQuitMsg.Text.Trim(), false);
                     SetIniValue("User", "UserId", this.GlobalUserId, false);
+                    this.GlobalNickPassword = txtNickPass.Text.Trim();
+                    SetIniValue("User", "NickPassword", this.GlobalNickPassword, false);
+                    foreach (NyaaServerSession sess in this.Sessions.Values)
+                    {
+                        sess.NickPassword = this.GlobalNickPassword;
+                    }
 
                     // 3. Server Connection
                     if (!string.IsNullOrEmpty(txtSrvUrl.Text.Trim()))
