@@ -137,6 +137,9 @@ namespace NyaaChatNative
         public string InitialTargetChannel = "#자유대화";
         public string InitialChannelKey = "";
         public string NickPassword = "";
+        public bool ManualDisconnect = false;
+        public int ReconnectAttempts = 0;
+        public bool IsReconnecting = false;
 
         public Dictionary<string, ChannelItemInfo> Channels = new Dictionary<string, ChannelItemInfo>(StringComparer.OrdinalIgnoreCase);
         public List<OnlineUserInfo> OnlineUsers = new List<OnlineUserInfo>();
@@ -178,7 +181,8 @@ namespace NyaaChatNative
 
         public void ConnectAsync()
         {
-            Disconnect();
+            this.ManualDisconnect = false;
+            Disconnect(false);
             this.cts = new CancellationTokenSource();
             CancellationToken token = this.cts.Token;
 
@@ -247,6 +251,10 @@ namespace NyaaChatNative
                     this.form.BeginInvoke((MethodInvoker)delegate
                     {
                         this.form.OnSessionDisconnected(this);
+                        if (!this.ManualDisconnect)
+                        {
+                            this.form.ScheduleAutoReconnect(this);
+                        }
                     });
                 }
             }, token);
@@ -353,8 +361,9 @@ namespace NyaaChatNative
             });
         }
 
-        public void Disconnect()
+        public void Disconnect(bool manual = true)
         {
+            if (manual) this.ManualDisconnect = true;
             this.IsConnected = false;
             try
             {
@@ -630,7 +639,8 @@ namespace NyaaChatNative
             "112", "report", "me", "clear", "export", "help",
             "theme", "color", "font", "lang", "language", "settings", "config", "설정",
             "modules", "module", "모듈",
-            "peer", "servername", "serverurl", "extcmd"
+            "peer", "servername", "serverurl", "extcmd",
+            "away", "back", "ignore", "unignore", "ignorelist", "highlight", "hl", "find"
         };
 
         // Language Configuration:
@@ -669,6 +679,76 @@ namespace NyaaChatNative
         public string GlobalNickname = "";
         public string GlobalNickPassword = "";
         public string GlobalUserId = "";
+        public bool EnableNickColoring = true;
+        public bool IsAway = false;
+        public string AwayReason = "";
+        private long lastAwayAutoReplyMs = 0;
+        public HashSet<string> IgnoredUsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        public List<string> HighlightKeywords = new List<string>();
+        private int unreadMessagesForActiveRoom = 0;
+
+        // Instant Search Bar Controls (Ctrl+F)
+        private Panel pnlSearch;
+        private TextBox txtSearchQuery;
+        private Button btnSearchPrev;
+        private Button btnSearchNext;
+        private Button btnSearchClose;
+        private Label lblSearchInfo;
+
+        private static readonly Color[] NickColorsDark = new Color[]
+        {
+            ColorTranslator.FromHtml("#38BDF8"), // Sky Blue
+            ColorTranslator.FromHtml("#34D399"), // Mint / Emerald
+            ColorTranslator.FromHtml("#F472B6"), // Pink
+            ColorTranslator.FromHtml("#FBBF24"), // Amber
+            ColorTranslator.FromHtml("#A78BFA"), // Lavender
+            ColorTranslator.FromHtml("#FB923C"), // Orange
+            ColorTranslator.FromHtml("#2DD4BF"), // Teal
+            ColorTranslator.FromHtml("#E879F9"), // Fuchsia
+            ColorTranslator.FromHtml("#4ADE80"), // Light Green
+            ColorTranslator.FromHtml("#818CF8"), // Indigo
+            ColorTranslator.FromHtml("#F87171"), // Soft Coral
+            ColorTranslator.FromHtml("#67E8F9"), // Cyan
+            ColorTranslator.FromHtml("#FACC15"), // Gold
+            ColorTranslator.FromHtml("#C084FC"), // Violet
+            ColorTranslator.FromHtml("#A3E635"), // Lime
+            ColorTranslator.FromHtml("#FB7185")  // Rose
+        };
+
+        private static readonly Color[] NickColorsLight = new Color[]
+        {
+            ColorTranslator.FromHtml("#0284C7"), // Deep Sky Blue
+            ColorTranslator.FromHtml("#059669"), // Forest Emerald
+            ColorTranslator.FromHtml("#DB2777"), // Deep Pink
+            ColorTranslator.FromHtml("#D97706"), // Dark Amber
+            ColorTranslator.FromHtml("#7C3AED"), // Deep Purple
+            ColorTranslator.FromHtml("#EA580C"), // Deep Orange
+            ColorTranslator.FromHtml("#0D9488"), // Dark Teal
+            ColorTranslator.FromHtml("#C026D3"), // Dark Fuchsia
+            ColorTranslator.FromHtml("#16A34A"), // Dark Green
+            ColorTranslator.FromHtml("#4F46E5"), // Dark Indigo
+            ColorTranslator.FromHtml("#DC2626"), // Crimson Red
+            ColorTranslator.FromHtml("#0891B2"), // Dark Cyan
+            ColorTranslator.FromHtml("#CA8A04"), // Dark Gold
+            ColorTranslator.FromHtml("#9333EA"), // Dark Violet
+            ColorTranslator.FromHtml("#65A30D"), // Dark Lime
+            ColorTranslator.FromHtml("#E11D48")  // Dark Rose
+        };
+
+        public Color GetNickColor(string nickname)
+        {
+            if (string.IsNullOrEmpty(nickname)) return this.ColTextOtherNick;
+            uint hash = 5381;
+            for (int i = 0; i < nickname.Length; i++)
+            {
+                hash = ((hash << 5) + hash) + (uint)nickname[i];
+            }
+            bool isDark = (this.ColBgChat.R * 0.299 + this.ColBgChat.G * 0.587 + this.ColBgChat.B * 0.114) < 128;
+            Color[] palette = isDark ? NickColorsDark : NickColorsLight;
+            int idx = (int)(hash % (uint)palette.Length);
+            return palette[idx];
+        }
+
         private int currentOpacityPct = 100;
         private bool isExiting = false;
 
@@ -804,6 +884,9 @@ namespace NyaaChatNative
             }
             this.GlobalNickname = GetIni("User", "DefaultNickname", "");
             this.GlobalNickPassword = GetIni("User", "NickPassword", "");
+            this.EnableNickColoring = GetIni("Theme", "NickColoring", "true").ToLower() != "false";
+            LoadIgnoredUsersFromIni();
+            LoadHighlightKeywordsFromIni();
 
             BuildNativeUI();
             InitTrayIcon();
@@ -1224,6 +1307,197 @@ namespace NyaaChatNative
             File.WriteAllLines(filePath, outLines.ToArray(), Encoding.UTF8);
         }
 
+        private void LoadIgnoredUsersFromIni()
+        {
+            this.IgnoredUsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string raw = GetIni("Ignore", "Users", "");
+            if (!string.IsNullOrEmpty(raw))
+            {
+                string[] arr = raw.Split(new char[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i < arr.Length; i++)
+                {
+                    string u = arr[i].Trim();
+                    if (!string.IsNullOrEmpty(u)) this.IgnoredUsers.Add(u);
+                }
+            }
+        }
+
+        private void SaveIgnoredUsersToIni()
+        {
+            string val = this.IgnoredUsers != null && this.IgnoredUsers.Count > 0 ? string.Join(", ", this.IgnoredUsers) : "";
+            SetIniValue("Ignore", "Users", val, true);
+        }
+
+        private void LoadHighlightKeywordsFromIni()
+        {
+            this.HighlightKeywords = new List<string>();
+            string raw = GetIni("Highlight", "Keywords", "");
+            if (!string.IsNullOrEmpty(raw))
+            {
+                string[] arr = raw.Split(new char[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i < arr.Length; i++)
+                {
+                    string kw = arr[i].Trim();
+                    if (!string.IsNullOrEmpty(kw) && !this.HighlightKeywords.Contains(kw))
+                    {
+                        this.HighlightKeywords.Add(kw);
+                    }
+                }
+            }
+        }
+
+        public void ScheduleAutoReconnect(NyaaServerSession session)
+        {
+            if (session == null || session.ManualDisconnect || this.isExiting) return;
+            if (session.IsReconnecting) return;
+
+            session.IsReconnecting = true;
+            session.ReconnectAttempts++;
+            int delaySec = Math.Min(15, Math.Max(2, session.ReconnectAttempts * 2));
+
+            AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format(
+                Tr("* [{0}] 서버 연결이 끊겼습니다. {1}초 후 자동으로 재접속합니다... (시도 {2}회)",
+                   "* Connection to [{0}] lost. Auto-reconnecting in {1}s... (Attempt {2})"),
+                session.Host, delaySec, session.ReconnectAttempts
+            ));
+
+            System.Windows.Forms.Timer reconnectTimer = new System.Windows.Forms.Timer();
+            reconnectTimer.Interval = delaySec * 1000;
+            reconnectTimer.Tick += delegate
+            {
+                reconnectTimer.Stop();
+                reconnectTimer.Dispose();
+                session.IsReconnecting = false;
+                if (!session.ManualDisconnect && !session.IsConnected && !this.isExiting)
+                {
+                    AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format(
+                        Tr("* [{0}] 서버에 재접속 시도 중...", "* Reconnecting to [{0}]..."), session.Host));
+                    session.ConnectAsync();
+                }
+            };
+            reconnectTimer.Start();
+        }
+
+        private void RenderUnreadSeparator()
+        {
+            this.rtbChat.SelectionStart = this.rtbChat.TextLength;
+            this.rtbChat.SelectionLength = 0;
+            this.rtbChat.SelectionColor = Color.FromArgb(239, 68, 68);
+            this.rtbChat.SelectionFont = this.ChatBoldFont;
+            string text = Tr("────────── 신규 메시지 ──────────", "────────── New Messages ──────────");
+            this.rtbChat.AppendText(text + Environment.NewLine);
+        }
+
+        public void ToggleSearchBar()
+        {
+            if (this.pnlSearch == null) return;
+            if (this.pnlSearch.Visible)
+            {
+                CloseSearchBar();
+            }
+            else
+            {
+                OpenSearchBar();
+            }
+        }
+
+        public void OpenSearchBar()
+        {
+            if (this.pnlSearch == null) return;
+            this.pnlSearch.Visible = true;
+            if (this.rtbChat != null && !string.IsNullOrEmpty(this.rtbChat.SelectedText))
+            {
+                this.txtSearchQuery.Text = this.rtbChat.SelectedText.Trim();
+                this.txtSearchQuery.SelectAll();
+            }
+            this.txtSearchQuery.Focus();
+        }
+
+        public void CloseSearchBar()
+        {
+            if (this.pnlSearch == null) return;
+            this.pnlSearch.Visible = false;
+            if (this.lblSearchInfo != null) this.lblSearchInfo.Text = "";
+            if (this.txtInput != null)
+            {
+                this.txtInput.Focus();
+            }
+        }
+
+        private void PerformSearch(bool forward)
+        {
+            if (this.rtbChat == null || this.txtSearchQuery == null) return;
+            string query = this.txtSearchQuery.Text;
+            if (string.IsNullOrEmpty(query)) return;
+
+            int docLen = this.rtbChat.TextLength;
+            if (docLen == 0)
+            {
+                if (this.lblSearchInfo != null)
+                {
+                    this.lblSearchInfo.Text = Tr("버퍼가 비어있습니다.", "Buffer empty.");
+                    this.lblSearchInfo.ForeColor = Color.FromArgb(239, 68, 68);
+                }
+                return;
+            }
+
+            int currentPos = this.rtbChat.SelectionStart;
+            int foundIdx = -1;
+
+            try
+            {
+                if (forward)
+                {
+                    int start = currentPos + Math.Max(1, this.rtbChat.SelectionLength);
+                    if (start < docLen)
+                    {
+                        foundIdx = this.rtbChat.Find(query, start, docLen, RichTextBoxFinds.None);
+                    }
+                    if (foundIdx < 0 && start > 0)
+                    {
+                        int end = Math.Min(docLen, start + query.Length);
+                        foundIdx = this.rtbChat.Find(query, 0, end, RichTextBoxFinds.None);
+                    }
+                }
+                else
+                {
+                    int end = currentPos;
+                    if (end > 0)
+                    {
+                        foundIdx = this.rtbChat.Find(query, 0, end, RichTextBoxFinds.Reverse);
+                    }
+                    if (foundIdx < 0 && end < docLen)
+                    {
+                        foundIdx = this.rtbChat.Find(query, end, docLen, RichTextBoxFinds.Reverse);
+                    }
+                }
+            }
+            catch
+            {
+                foundIdx = -1;
+            }
+
+            if (foundIdx >= 0)
+            {
+                this.rtbChat.SelectionStart = foundIdx;
+                this.rtbChat.SelectionLength = query.Length;
+                this.rtbChat.ScrollToCaret();
+                if (this.lblSearchInfo != null)
+                {
+                    this.lblSearchInfo.Text = Tr("결과 찾음", "Match found");
+                    this.lblSearchInfo.ForeColor = Color.FromArgb(52, 211, 153);
+                }
+            }
+            else
+            {
+                if (this.lblSearchInfo != null)
+                {
+                    this.lblSearchInfo.Text = Tr("일치 항목 없음", "Not found");
+                    this.lblSearchInfo.ForeColor = Color.FromArgb(239, 68, 68);
+                }
+            }
+        }
+
         private void BuildNativeUI()
         {
             // 1. Top Customization & Multi-Server Toolbar
@@ -1491,6 +1765,103 @@ namespace NyaaChatNative
                 this.btnTermClear, this.btnTermRestart, this.btnTermBackToChat
             });
 
+            // Instant Quick Search Bar (Ctrl+F)
+            this.pnlSearch = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 34,
+                Padding = new Padding(8, 4, 8, 4),
+                Visible = false
+            };
+
+            Label lblSearchIcon = new Label
+            {
+                Text = Tr("검색:", "Find:"),
+                AutoSize = true,
+                Location = new Point(8, 8),
+                Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+            };
+
+            this.txtSearchQuery = new TextBox
+            {
+                Location = new Point(54, 5),
+                Width = 200,
+                Font = new Font("맑은 고딕", 9.5f),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            this.txtSearchQuery.KeyDown += delegate (object s, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    e.SuppressKeyPress = true;
+                    e.Handled = true;
+                    PerformSearch(!e.Shift);
+                }
+                else if (e.KeyCode == Keys.Escape)
+                {
+                    e.SuppressKeyPress = true;
+                    e.Handled = true;
+                    CloseSearchBar();
+                }
+            };
+            this.txtSearchQuery.TextChanged += delegate
+            {
+                if (this.lblSearchInfo != null) this.lblSearchInfo.Text = "";
+            };
+
+            this.btnSearchPrev = new Button
+            {
+                Text = "▲",
+                Location = new Point(258, 4),
+                Size = new Size(28, 25),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("맑은 고딕", 8f, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            this.btnSearchPrev.FlatAppearance.BorderSize = 1;
+            this.btnSearchPrev.Click += delegate { PerformSearch(false); };
+
+            this.btnSearchNext = new Button
+            {
+                Text = "▼",
+                Location = new Point(290, 4),
+                Size = new Size(28, 25),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("맑은 고딕", 8f, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            this.btnSearchNext.FlatAppearance.BorderSize = 1;
+            this.btnSearchNext.Click += delegate { PerformSearch(true); };
+
+            this.lblSearchInfo = new Label
+            {
+                Text = "",
+                Location = new Point(326, 8),
+                AutoSize = true,
+                Font = new Font("맑은 고딕", 8.5f)
+            };
+
+            this.btnSearchClose = new Button
+            {
+                Text = "✕",
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                Size = new Size(28, 25),
+                Location = new Point(500, 4),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("맑은 고딕", 8.5f, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            this.btnSearchClose.FlatAppearance.BorderSize = 0;
+            this.btnSearchClose.Click += delegate { CloseSearchBar(); };
+            this.pnlSearch.Resize += delegate
+            {
+                this.btnSearchClose.Left = Math.Max(360, this.pnlSearch.Width - this.btnSearchClose.Width - 8);
+            };
+
+            this.pnlSearch.Controls.AddRange(new Control[] {
+                lblSearchIcon, this.txtSearchQuery, this.btnSearchPrev, this.btnSearchNext, this.lblSearchInfo, this.btnSearchClose
+            });
+
             // Per-Server Extended Commands & Module Quick Bar (Only visible when active server has extensions/modules!)
             this.serverExtModuleBar = new FlowLayoutPanel
             {
@@ -1530,6 +1901,21 @@ namespace NyaaChatNative
             };
             this.txtInput.KeyDown += delegate (object s, KeyEventArgs e)
             {
+                if (e.Control && e.KeyCode == Keys.F)
+                {
+                    e.SuppressKeyPress = true;
+                    e.Handled = true;
+                    ToggleSearchBar();
+                    return;
+                }
+                if (e.KeyCode == Keys.Escape && this.pnlSearch != null && this.pnlSearch.Visible)
+                {
+                    e.SuppressKeyPress = true;
+                    e.Handled = true;
+                    CloseSearchBar();
+                    return;
+                }
+
                 if (e.KeyCode == Keys.Tab && !e.Control && !e.Alt)
                 {
                     e.SuppressKeyPress = true;
@@ -1641,6 +2027,21 @@ namespace NyaaChatNative
             {
                 HandleChatLinkClicked(e.LinkText);
             };
+            this.rtbChat.KeyDown += delegate (object s, KeyEventArgs e)
+            {
+                if (e.Control && e.KeyCode == Keys.F)
+                {
+                    e.SuppressKeyPress = true;
+                    e.Handled = true;
+                    ToggleSearchBar();
+                }
+                else if (e.KeyCode == Keys.Escape && this.pnlSearch != null && this.pnlSearch.Visible)
+                {
+                    e.SuppressKeyPress = true;
+                    e.Handled = true;
+                    CloseSearchBar();
+                }
+            };
 
             // Interactive PowerShell / Terminal RichTextBox (shares center view with rtbChat)
             this.rtbTerminal = new RichTextBox
@@ -1661,7 +2062,9 @@ namespace NyaaChatNative
             this.rightInnerSplit.Panel1.Controls.Add(this.rtbChat);
             this.rightInnerSplit.Panel1.Controls.Add(this.serverExtModuleBar);
             this.rightInnerSplit.Panel1.Controls.Add(this.inputBottomPanel);
+            this.rightInnerSplit.Panel1.Controls.Add(this.pnlSearch);
             this.rightInnerSplit.Panel1.Controls.Add(this.channelHeaderBar);
+            this.channelHeaderBar.BringToFront();
 
             // 5. Right Panel: Online Users List
             this.rightHeaderPanel = new Panel { Dock = DockStyle.Top, Height = 34 };
@@ -1751,6 +2154,12 @@ namespace NyaaChatNative
                 string n = getSelectedUserCleanNick();
                 if (!string.IsNullOrEmpty(n)) ExecuteSlashCommand("/ban " + n);
             });
+            userMenu.Items.Add(new ToolStripSeparator());
+            userMenu.Items.Add("유저 메시지 차단/해제 (/ignore)", null, delegate
+            {
+                string n = getSelectedUserCleanNick();
+                if (!string.IsNullOrEmpty(n)) ExecuteSlashCommand("/ignore " + n);
+            });
             this.lstOnlineUsers.ContextMenuStrip = userMenu;
 
             this.rightInnerSplit.Panel2.Controls.Add(this.lstOnlineUsers);
@@ -1805,6 +2214,10 @@ namespace NyaaChatNative
                 this.lstOnlineUsers.ContextMenuStrip.Items[6].Text = Tr("발언권(-v) 회수 (/mode -v)", "Revoke Voice (-v /mode -v)");
                 this.lstOnlineUsers.ContextMenuStrip.Items[8].Text = Tr("채널에서 강퇴 (/kick)", "Kick from Channel (/kick)");
                 this.lstOnlineUsers.ContextMenuStrip.Items[9].Text = Tr("서버 영구 차단 (/ban · 서버관리자)", "Ban from Server (/ban · Oper)");
+                if (this.lstOnlineUsers.ContextMenuStrip.Items.Count >= 12)
+                {
+                    this.lstOnlineUsers.ContextMenuStrip.Items[11].Text = Tr("유저 메시지 차단/해제 (/ignore)", "Ignore/Unignore User (/ignore)");
+                }
             }
 
             if (this.ActiveSession == null && !this.IsTerminalViewActive)
@@ -1986,6 +2399,21 @@ namespace NyaaChatNative
             this.rtbChat.BackColor = this.ColBgChat;
             this.rtbChat.ForeColor = this.ColTextPrimary;
             this.rtbChat.Font = this.ChatFont;
+
+            if (this.pnlSearch != null)
+            {
+                this.pnlSearch.BackColor = this.ColBgHeader;
+                this.txtSearchQuery.BackColor = this.ColBgInput;
+                this.txtSearchQuery.ForeColor = this.ColTextPrimary;
+                this.btnSearchPrev.BackColor = this.ColBgSidebar;
+                this.btnSearchPrev.ForeColor = this.ColTextPrimary;
+                this.btnSearchPrev.FlatAppearance.BorderColor = this.ColBorder;
+                this.btnSearchNext.BackColor = this.ColBgSidebar;
+                this.btnSearchNext.ForeColor = this.ColTextPrimary;
+                this.btnSearchNext.FlatAppearance.BorderColor = this.ColBorder;
+                this.btnSearchClose.BackColor = this.ColBgHeader;
+                this.btnSearchClose.ForeColor = this.ColTextSecondary;
+            }
 
             if (this.rtbTerminal != null)
             {
@@ -2361,6 +2789,28 @@ namespace NyaaChatNative
 
         public void OnSessionSocketConnected(NyaaServerSession session)
         {
+            if (session.ReconnectAttempts > 0)
+            {
+                AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format(
+                    Tr("* [{0}] 서버에 다시 연결되었습니다.", "* Successfully reconnected to [{0}]."),
+                    session.Host
+                ));
+                session.ReconnectAttempts = 0;
+
+                // Re-join existing joined channels
+                foreach (string ch in new List<string>(session.Channels.Keys))
+                {
+                    if (!string.IsNullOrEmpty(ch) && ch != session.InitialTargetChannel)
+                    {
+                        session.Emit("join_channel", new Dictionary<string, object>
+                        {
+                            { "channelName", ch },
+                            { "key", "" }
+                        });
+                    }
+                }
+            }
+            session.IsReconnecting = false;
             UpdateConnectionBadge();
             RefreshLeftServerTree();
         }
@@ -2855,6 +3305,12 @@ namespace NyaaChatNative
                 if (s.ContainsKey("isBot")) isBot = Convert.ToBoolean(s["isBot"]);
             }
 
+            if (this.IgnoredUsers != null && this.IgnoredUsers.Contains(senderNick))
+            {
+                // Silently drop messages from locally ignored users
+                return;
+            }
+
             ChatMessageItem item = new ChatMessageItem
             {
                 Id = d.ContainsKey("id") ? Convert.ToString(d["id"]) : Guid.NewGuid().ToString("N"),
@@ -2882,14 +3338,55 @@ namespace NyaaChatNative
                 CheckOnTextScriptRules(session, roomId, senderNick, content);
             }
 
-            // Check Mention & Sound Playback
+            // Check Mention & Away Auto-Reply
             bool isMention = isFromOther && !string.IsNullOrEmpty(session.MyNickname) && content.IndexOf(session.MyNickname, StringComparison.OrdinalIgnoreCase) >= 0;
+            if (isFromOther && this.IsAway && (isMention || !roomId.StartsWith("#")))
+            {
+                long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (nowMs - this.lastAwayAutoReplyMs > 30000)
+                {
+                    this.lastAwayAutoReplyMs = nowMs;
+                    string replyMsg = string.IsNullOrEmpty(this.AwayReason)
+                        ? Tr("[자동응답] 현재 자리비움 상태입니다.", "[Auto-Reply] I am currently away.")
+                        : string.Format(Tr("[자동응답] 현재 자리비움 상태입니다: {0}", "[Auto-Reply] I am currently away: {0}"), this.AwayReason);
+                    session.Emit("send_message", new Dictionary<string, object>
+                    {
+                        { "roomId", roomId },
+                        { "content", replyMsg },
+                        { "type", "text" }
+                    });
+                }
+            }
+
+            // Check Keyword Highlights
+            bool isKeywordMatch = false;
+            string matchedKeyword = null;
+            if (isFromOther && this.HighlightKeywords != null && this.HighlightKeywords.Count > 0)
+            {
+                for (int ki = 0; ki < this.HighlightKeywords.Count; ki++)
+                {
+                    string kw = this.HighlightKeywords[ki];
+                    if (!string.IsNullOrEmpty(kw) && content.IndexOf(kw, StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        isKeywordMatch = true;
+                        matchedKeyword = kw;
+                        break;
+                    }
+                }
+            }
+
             bool isJoinLeave = msgType == "system" && (content.Contains("입장하셨습니다") || content.Contains("퇴장하셨습니다"));
 
             if (isMention)
             {
                 FlashMainWindow();
                 ShowTrayNotification(string.Format(Tr("[{0}] {1}님의 멘션", "[{0}] Mention from {1}"), roomId, senderNick), content);
+                PlayConfiguredSound("mention");
+            }
+            else if (isKeywordMatch)
+            {
+                FlashMainWindow();
+                ShowTrayNotification(string.Format(Tr("[{0}] 키워드 알림 ('{1}')", "[{0}] Keyword Alert ('{1}')"), roomId, matchedKeyword), string.Format("<{0}> {1}", senderNick, content));
                 PlayConfiguredSound("mention");
             }
             else if (isJoinLeave)
@@ -3133,6 +3630,12 @@ namespace NyaaChatNative
             {
                 this.ActiveSession = session;
                 this.ActiveRoomId = string.IsNullOrEmpty(roomId) ? "#자유대화" : roomId;
+                int unread = 0;
+                if (session.UnreadCounts.ContainsKey(this.ActiveRoomId))
+                {
+                    unread = session.UnreadCounts[this.ActiveRoomId];
+                }
+                this.unreadMessagesForActiveRoom = unread;
                 session.UnreadCounts[this.ActiveRoomId] = 0;
             }
 
@@ -3363,7 +3866,8 @@ namespace NyaaChatNative
                     "/help", "/settings", "/modules", "/theme", "/powershell",
                     "/terminal", "/query", "/msg", "/away", "/back", "/chat",
                     "/cls", "/restart", "/raw", "/ping", "/112", "/report",
-                    "/nickpass", "/identify", "/register", "/unregister"
+                    "/nickpass", "/identify", "/register", "/unregister",
+                    "/ignore", "/unignore", "/ignorelist", "/highlight", "/hl", "/find", "/search"
                 };
 
                 foreach (string c in baseCmds)
@@ -4143,9 +4647,20 @@ namespace NyaaChatNative
                 if (this.ActiveSession != null)
                 {
                     List<ChatMessageItem> history = this.ActiveSession.GetOrCreateRoomHistory(this.ActiveRoomId);
-                    foreach (ChatMessageItem m in history)
+                    int unreadCount = this.unreadMessagesForActiveRoom;
+                    int unreadStartIndex = -1;
+                    if (unreadCount > 0 && history.Count > 0)
                     {
-                        AppendSingleMessageToRtb(m, false);
+                        unreadStartIndex = Math.Max(0, history.Count - unreadCount);
+                    }
+
+                    for (int i = 0; i < history.Count; i++)
+                    {
+                        if (i == unreadStartIndex && unreadCount > 0)
+                        {
+                            RenderUnreadSeparator();
+                        }
+                        AppendSingleMessageToRtb(history[i], false);
                     }
                 }
 
@@ -4196,7 +4711,8 @@ namespace NyaaChatNative
             }
             else if (m.Type == "action")
             {
-                this.rtbChat.SelectionColor = this.ColTextAction;
+                Color nickCol = (this.EnableNickColoring && !string.IsNullOrEmpty(m.SenderNick)) ? GetNickColor(m.SenderNick) : this.ColTextAction;
+                this.rtbChat.SelectionColor = nickCol;
                 this.rtbChat.SelectionFont = this.ChatBoldFont;
                 this.rtbChat.AppendText(string.Format("* {0} {1}{2}", m.SenderNick, m.Content, Environment.NewLine));
             }
@@ -4216,7 +4732,21 @@ namespace NyaaChatNative
                     this.rtbChat.AppendText("@");
                 }
 
-                this.rtbChat.SelectionColor = isMe ? this.ColTextSelfNick : this.ColTextOtherNick;
+                Color nickCol;
+                if (isMe)
+                {
+                    nickCol = this.ColTextSelfNick;
+                }
+                else if (this.EnableNickColoring)
+                {
+                    nickCol = GetNickColor(m.SenderNick);
+                }
+                else
+                {
+                    nickCol = this.ColTextOtherNick;
+                }
+
+                this.rtbChat.SelectionColor = nickCol;
                 this.rtbChat.SelectionFont = this.ChatBoldFont;
                 this.rtbChat.AppendText("<" + m.SenderNick + "> ");
 
@@ -4333,6 +4863,13 @@ namespace NyaaChatNative
             {
                 ExecuteSlashCommand(raw);
                 return;
+            }
+
+            if (this.IsAway)
+            {
+                this.IsAway = false;
+                this.AwayReason = "";
+                AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, Tr("* 자리비움(Away) 모드가 해제되었습니다.", "* You are no longer marked as away."));
             }
 
             // Apply user_script.txt REPLACE_SEND rules
@@ -4734,6 +5271,140 @@ namespace NyaaChatNative
                 );
                 return;
             }
+            if (cmd == "find" || cmd == "search")
+            {
+                OpenSearchBar();
+                if (!string.IsNullOrEmpty(restText))
+                {
+                    this.txtSearchQuery.Text = restText;
+                    this.txtSearchQuery.SelectAll();
+                    PerformSearch(true);
+                }
+                return;
+            }
+            if (cmd == "away")
+            {
+                this.IsAway = true;
+                this.AwayReason = restText;
+                this.lastAwayAutoReplyMs = 0;
+                string notice = string.IsNullOrEmpty(restText)
+                    ? Tr("* 자리비움(Away) 모드가 설정되었습니다. 메시지를 전송하거나 /back 입력 시 해제됩니다.",
+                         "* Marked as away. Send a message or type /back to return.")
+                    : string.Format(Tr("* 자리비움(Away) 모드가 설정되었습니다: {0}", "* Marked as away: {0}"), restText);
+                AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, notice);
+                return;
+            }
+            if (cmd == "back")
+            {
+                if (this.IsAway)
+                {
+                    this.IsAway = false;
+                    this.AwayReason = "";
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, Tr("* 자리비움(Away) 모드가 해제되었습니다.", "* You are no longer marked as away."));
+                }
+                else
+                {
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, Tr("* 현재 자리비움 상태가 아닙니다.", "* You are not currently marked as away."));
+                }
+                return;
+            }
+            if (cmd == "ignore")
+            {
+                if (string.IsNullOrEmpty(restText))
+                {
+                    ExecuteSlashCommand("/ignorelist");
+                    return;
+                }
+                string targetNick = restText.Trim();
+                if (this.ActiveSession != null && string.Equals(targetNick, this.ActiveSession.MyNickname, StringComparison.OrdinalIgnoreCase))
+                {
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, Tr("* 자기 자신은 차단할 수 없습니다.", "* You cannot ignore yourself."));
+                    return;
+                }
+                if (this.IgnoredUsers.Contains(targetNick))
+                {
+                    this.IgnoredUsers.Remove(targetNick);
+                    SaveIgnoredUsersToIni();
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, string.Format(Tr("* [{0}] 유저의 차단을 해제했습니다.", "* Unignored user [{0}]."), targetNick));
+                }
+                else
+                {
+                    this.IgnoredUsers.Add(targetNick);
+                    SaveIgnoredUsersToIni();
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, string.Format(Tr("* [{0}] 유저를 로컬 차단했습니다. 해당 유저의 메시지가 숨겨집니다.", "* Ignored user [{0}]. Messages from this user will be hidden."), targetNick));
+                }
+                return;
+            }
+            if (cmd == "unignore")
+            {
+                if (string.IsNullOrEmpty(restText))
+                {
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, Tr("* 사용법: /unignore <닉네임>", "* Usage: /unignore <nickname>"));
+                    return;
+                }
+                string targetNick = restText.Trim();
+                if (this.IgnoredUsers.Remove(targetNick))
+                {
+                    SaveIgnoredUsersToIni();
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, string.Format(Tr("* [{0}] 유저의 차단을 해제했습니다.", "* Unignored user [{0}]."), targetNick));
+                }
+                else
+                {
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, string.Format(Tr("* [{0}] 유저는 차단 목록에 없습니다.", "* User [{0}] is not in your ignore list."), targetNick));
+                }
+                return;
+            }
+            if (cmd == "ignorelist")
+            {
+                if (this.IgnoredUsers == null || this.IgnoredUsers.Count == 0)
+                {
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, Tr("* 현재 차단된 유저가 없습니다.", "* No users are currently ignored."));
+                }
+                else
+                {
+                    string listStr = string.Join(", ", this.IgnoredUsers);
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, string.Format(Tr("* 차단된 유저 목록 ({0}명): {1}", "* Ignored users ({0}): {1}"), this.IgnoredUsers.Count, listStr));
+                }
+                return;
+            }
+            if (cmd == "highlight" || cmd == "hl")
+            {
+                if (string.IsNullOrEmpty(restText))
+                {
+                    if (this.HighlightKeywords == null || this.HighlightKeywords.Count == 0)
+                    {
+                        AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, Tr("* 등록된 하이라이트 키워드가 없습니다. 사용법: /highlight 키워드1, 키워드2", "* No highlight keywords set. Usage: /highlight word1, word2"));
+                    }
+                    else
+                    {
+                        AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, string.Format(Tr("* 현재 하이라이트 키워드 ({0}개): {1}", "* Current highlight keywords ({0}): {1}"), this.HighlightKeywords.Count, string.Join(", ", this.HighlightKeywords)));
+                    }
+                    return;
+                }
+
+                if (restText.Equals("clear", StringComparison.OrdinalIgnoreCase) || restText.Equals("초기화", StringComparison.OrdinalIgnoreCase))
+                {
+                    this.HighlightKeywords.Clear();
+                    SetIniValue("Highlight", "Keywords", "", true);
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, Tr("* 하이라이트 키워드를 모두 초기화했습니다.", "* Cleared all highlight keywords."));
+                    return;
+                }
+
+                string[] kws = restText.Split(new char[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries);
+                List<string> newKws = new List<string>();
+                for (int ki = 0; ki < kws.Length; ki++)
+                {
+                    string kw = kws[ki].Trim();
+                    if (!string.IsNullOrEmpty(kw) && !newKws.Contains(kw))
+                    {
+                        newKws.Add(kw);
+                    }
+                }
+                this.HighlightKeywords = newKws;
+                SetIniValue("Highlight", "Keywords", string.Join(", ", this.HighlightKeywords), true);
+                AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, string.Format(Tr("* 하이라이트 알림 키워드가 설정되었습니다 ({0}개): {1}", "* Highlight keywords set ({0}): {1}"), this.HighlightKeywords.Count, string.Join(", ", this.HighlightKeywords)));
+                return;
+            }
 
             // 2. Check Active Server's Extended Commands (Active ONLY on this server!)
             if (this.ActiveSession != null)
@@ -5095,6 +5766,9 @@ namespace NyaaChatNative
                 sb.AppendLine("• /modules (or /module) : Open Server Modules Manager (Add/Import/Toggle/Edit)");
                 sb.AppendLine("• /theme (or /color, /font) : Open Color Palette & Font Customizer");
                 sb.AppendLine("• /nickpass <pass> : Register password | /identify <pass> : Verify protected nick");
+                sb.AppendLine("• /away [reason] · /back : Set away auto-responder status | Return from away");
+                sb.AppendLine("• /ignore <nick> · /unignore · /ignorelist : Local mute annoying users");
+                sb.AppendLine("• /highlight [words] : Custom keyword alerts | Ctrl+F : Quick search buffer");
                 sb.AppendLine("• /lang [ko|en] : Switch UI language between Korean (ko) and English (en)");
                 if (this.ActiveSession != null && this.ActiveSession.IsMeServerOper)
                 {
@@ -5131,6 +5805,9 @@ namespace NyaaChatNative
                 sb.AppendLine("• /settings (또는 /설정, F10) : 설정창 열기 (간편설정 · 고급설정)");
                 sb.AppendLine("• /modules (또는 /모듈) : 서버별 확장 모듈 추가 · 가져오기 · 켜기/끄기 관리창 열기");
                 sb.AppendLine("• /theme (또는 /color, /font) : 색상 팔레트 · 글꼴 설정창 열기");
+                sb.AppendLine("• /away [이유] · /back : 자리비움 자동응답 모드 설정 | 복귀");
+                sb.AppendLine("• /ignore <닉네임> · /unignore · /ignorelist : 불량 유저 메시지 로컬 차단");
+                sb.AppendLine("• /highlight [단어1, ...] : 커스텀 키워드 알림 | Ctrl+F : 버퍼 즉석 검색");
                 sb.AppendLine("• /lang [ko|en] : 클라이언트 표시 언어 전환 (ko: 한국어 기본 / en: 영어)");
                 if (this.ActiveSession != null && this.ActiveSession.IsMeServerOper)
                 {
@@ -8268,7 +8945,17 @@ namespace NyaaChatNative
 
         private void OnGlobalKeyDown(object sender, KeyEventArgs e)
         {
-            if (e.KeyCode == Keys.F2)
+            if (e.Control && e.KeyCode == Keys.F)
+            {
+                e.SuppressKeyPress = true;
+                ToggleSearchBar();
+            }
+            else if (e.KeyCode == Keys.Escape && this.pnlSearch != null && this.pnlSearch.Visible)
+            {
+                e.SuppressKeyPress = true;
+                CloseSearchBar();
+            }
+            else if (e.KeyCode == Keys.F2)
             {
                 e.SuppressKeyPress = true;
                 OpenServerListExplorer();
