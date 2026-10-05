@@ -18,9 +18,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 using System.IO;
 using System.Media;
 using System.Net;
@@ -94,10 +96,14 @@ namespace NyaaChatNative
         public string Id;
         public string Name;
         public string Version;
-        public string TargetServer; // matches host or serverName
+        public string TargetServer; // matches host or serverName, or "*" for all servers
         public string Description;
+        public bool Enabled = true;
+        public string ModuleType = "Standard"; // "Standard" or "Terminal"
+        public string ShellExe = "powershell.exe";
         public Dictionary<string, string> Buttons = new Dictionary<string, string>();
         public Dictionary<string, string> Commands = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        public List<string[]> Triggers = new List<string[]>(); // [keyword, actionType, payload]
     }
 
     public class DirectoryServerEntry
@@ -137,6 +143,7 @@ namespace NyaaChatNative
         public Dictionary<string, int> UnreadCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         public List<ServerExtCommand> ServerExtendedCommands = new List<ServerExtCommand>();
         public bool HasAnnouncedExtensions = false;
+        public bool HasAutoJoined = false;
 
         private ClientWebSocket ws;
         private CancellationTokenSource cts;
@@ -362,10 +369,207 @@ namespace NyaaChatNative
     }
 
     // ========================================================================
+    // Custom Theme-Aware Controls (Eliminates White Win32 ComboBox & Scrollbars)
+    // ========================================================================
+    public class ThemedComboBox : ComboBox
+    {
+        public Color BorderColor = ColorTranslator.FromHtml("#334155");
+        public Color HighlightColor = ColorTranslator.FromHtml("#4F46E5");
+
+        public ThemedComboBox()
+        {
+            this.SetStyle(
+                ControlStyles.UserPaint |
+                ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.OptimizedDoubleBuffer |
+                ControlStyles.ResizeRedraw,
+                true
+            );
+            this.DrawMode = DrawMode.OwnerDrawFixed;
+            this.FlatStyle = FlatStyle.Flat;
+            this.DropDownStyle = ComboBoxStyle.DropDownList;
+            this.ItemHeight = 20;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            Color bg = this.BackColor;
+            Color fg = this.ForeColor;
+            Color bd = this.BorderColor;
+            if (bd.R == bg.R && bd.G == bg.G && bd.B == bg.B)
+            {
+                int delta = (bg.R < 128) ? 45 : -45;
+                bd = Color.FromArgb(
+                    Math.Max(0, Math.Min(255, bg.R + delta)),
+                    Math.Max(0, Math.Min(255, bg.G + delta)),
+                    Math.Max(0, Math.Min(255, bg.B + delta))
+                );
+            }
+
+            using (SolidBrush bgBrush = new SolidBrush(bg))
+            {
+                g.FillRectangle(bgBrush, this.ClientRectangle);
+            }
+
+            string text = "";
+            if (this.SelectedIndex >= 0 && this.SelectedIndex < this.Items.Count)
+            {
+                text = Convert.ToString(this.Items[this.SelectedIndex]);
+            }
+            else
+            {
+                text = this.Text ?? "";
+            }
+
+            Rectangle textRect = new Rectangle(6, 0, Math.Max(10, this.Width - 24), this.Height);
+            TextRenderer.DrawText(
+                g,
+                text,
+                this.Font,
+                textRect,
+                fg,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine
+            );
+
+            // Draw dropdown arrow
+            int cx = this.Width - 13;
+            int cy = this.Height / 2;
+            Point[] arrow = new Point[]
+            {
+                new Point(cx - 4, cy - 2),
+                new Point(cx + 4, cy - 2),
+                new Point(cx, cy + 3)
+            };
+            using (SolidBrush arrowBrush = new SolidBrush(fg))
+            {
+                g.FillPolygon(arrowBrush, arrow);
+            }
+
+            using (Pen borderPen = new Pen(bd, 1f))
+            {
+                g.DrawRectangle(borderPen, 0, 0, this.Width - 1, this.Height - 1);
+            }
+        }
+
+        protected override void OnDrawItem(DrawItemEventArgs e)
+        {
+            if (e.Index < 0 || e.Index >= this.Items.Count)
+            {
+                using (SolidBrush b = new SolidBrush(this.BackColor))
+                {
+                    e.Graphics.FillRectangle(b, e.Bounds);
+                }
+                return;
+            }
+
+            bool selected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+            Color bg = selected ? this.HighlightColor : this.BackColor;
+            if (selected && bg.R == this.BackColor.R && bg.G == this.BackColor.G && bg.B == this.BackColor.B)
+            {
+                bg = Color.FromArgb(55, 65, 81);
+            }
+            Color fg = selected ? Color.White : this.ForeColor;
+
+            using (SolidBrush b = new SolidBrush(bg))
+            {
+                e.Graphics.FillRectangle(b, e.Bounds);
+            }
+
+            string itemText = Convert.ToString(this.Items[e.Index]);
+            Rectangle r = new Rectangle(e.Bounds.X + 6, e.Bounds.Y, Math.Max(10, e.Bounds.Width - 10), e.Bounds.Height);
+            TextRenderer.DrawText(
+                e.Graphics,
+                itemText,
+                this.Font,
+                r,
+                fg,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine
+            );
+        }
+    }
+
+    public class ThemedTreeView : TreeView
+    {
+        [DllImport("user32.dll")]
+        private static extern bool ShowScrollBar(IntPtr hWnd, int wBar, bool bShow);
+
+        private const int SB_HORZ = 0;
+        private const int TVS_NOHSCROLL = 0x8000;
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.Style |= TVS_NOHSCROLL;
+                return cp;
+            }
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+            // Suppress horizontal scrollbar (0x0005 = WM_SIZE, 0x0085 = WM_NCPAINT, 0x000F = WM_PAINT)
+            if (this.IsHandleCreated && (m.Msg == 0x0005 || m.Msg == 0x0085 || m.Msg == 0x000F))
+            {
+                try { ShowScrollBar(this.Handle, SB_HORZ, false); } catch { }
+            }
+        }
+    }
+
+    public class ChatInputTextBox : TextBox
+    {
+        protected override bool IsInputKey(Keys keyData)
+        {
+            if ((keyData & Keys.KeyCode) == Keys.Tab) return true;
+            return base.IsInputKey(keyData);
+        }
+    }
+
+    public class ThemedMenuColorTable : ProfessionalColorTable
+    {
+        private readonly Color bg;
+        private readonly Color border;
+        private readonly Color accent;
+
+        public ThemedMenuColorTable(Color bg, Color border, Color accent)
+        {
+            this.bg = bg;
+            this.border = border;
+            this.accent = accent;
+        }
+
+        public override Color ToolStripDropDownBackground { get { return this.bg; } }
+        public override Color ImageMarginGradientBegin { get { return this.bg; } }
+        public override Color ImageMarginGradientMiddle { get { return this.bg; } }
+        public override Color ImageMarginGradientEnd { get { return this.bg; } }
+        public override Color MenuBorder { get { return this.border; } }
+        public override Color MenuItemBorder { get { return this.accent; } }
+        public override Color MenuItemSelected { get { return this.accent; } }
+        public override Color MenuItemSelectedGradientBegin { get { return this.accent; } }
+        public override Color MenuItemSelectedGradientEnd { get { return this.accent; } }
+        public override Color SeparatorDark { get { return this.border; } }
+        public override Color SeparatorLight { get { return this.bg; } }
+    }
+
+    // ========================================================================
     // Main Native Client Window
     // ========================================================================
     public class MainForm : Form
     {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FLASHWINFO
+        {
+            public uint cbSize;
+            public IntPtr hwnd;
+            public uint dwFlags;
+            public uint uCount;
+            public uint dwTimeout;
+        }
+
         [DllImport("user32.dll")]
         private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
 
@@ -374,6 +578,16 @@ namespace NyaaChatNative
 
         [DllImport("user32.dll")]
         private static extern bool FlashWindow(IntPtr hwnd, bool bInvert);
+
+        [DllImport("user32.dll")]
+        private static extern bool FlashWindowEx(ref FLASHWINFO pwfi);
+
+        private const uint FLASHW_STOP = 0;
+        private const uint FLASHW_CAPTION = 1;
+        private const uint FLASHW_TRAY = 2;
+        private const uint FLASHW_ALL = 3;
+        private const uint FLASHW_TIMER = 4;
+        private const uint FLASHW_TIMERNOFG = 12;
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
@@ -384,7 +598,18 @@ namespace NyaaChatNative
         [DllImport("user32.dll")]
         private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+        private static extern int SetWindowTheme(IntPtr hWnd, string pszSubAppName, string pszSubIdList);
+
         private const int WM_SETREDRAW = 0x000B;
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19;
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+        private const int DWMWA_BORDER_COLOR = 34;
+        private const int DWMWA_CAPTION_COLOR = 35;
+        private const int DWMWA_TEXT_COLOR = 36;
         private const int GWL_EXSTYLE = -20;
         private const int WS_EX_LAYERED = 0x00080000;
         private const int HOTKEY_ID_BOSS = 9001;
@@ -398,8 +623,24 @@ namespace NyaaChatNative
             "nick", "whois", "w", "msg", "query", "topic", "mode",
             "op", "deop", "kick", "ban", "unban", "banlist", "oper",
             "112", "report", "me", "clear", "export", "help",
+            "theme", "color", "font", "lang", "language", "settings", "config", "설정",
+            "modules", "module", "모듈",
             "peer", "servername", "serverurl", "extcmd"
         };
+
+        // Language Configuration:
+        // Default is Korean ("ko") during development/testing.
+        // Change DEFAULT_LANGUAGE to "en" when open-sourcing/releasing globally.
+        public const string DEFAULT_LANGUAGE = "ko";
+        public string CurrentLanguage = DEFAULT_LANGUAGE; // "ko" or "en"
+        public bool IsEnglish
+        {
+            get { return string.Equals(this.CurrentLanguage, "en", StringComparison.OrdinalIgnoreCase); }
+        }
+        public string Tr(string ko, string en)
+        {
+            return this.IsEnglish ? en : ko;
+        }
 
         public readonly string BaseDir;
         public readonly string IniPath;
@@ -426,6 +667,8 @@ namespace NyaaChatNative
         private bool isExiting = false;
 
         // Theme Colors & Fonts
+        public Color ColBgTitleBar = ColorTranslator.FromHtml("#0F172A");
+        public Color ColTextTitleBar = ColorTranslator.FromHtml("#F8FAFC");
         public Color ColBgWindow = ColorTranslator.FromHtml("#0F172A");
         public Color ColBgSidebar = ColorTranslator.FromHtml("#1E293B");
         public Color ColBgChat = ColorTranslator.FromHtml("#0B1120");
@@ -444,40 +687,70 @@ namespace NyaaChatNative
         public Color ColBorder = ColorTranslator.FromHtml("#334155");
         public Font ChatFont = new Font("맑은 고딕", 10f, FontStyle.Regular);
         public Font ChatBoldFont = new Font("맑은 고딕", 10f, FontStyle.Bold);
+        public string CurrentFontName = "맑은 고딕";
+        public float CurrentFontSize = 10f;
+        public string CurrentFontWeightMode = "normal"; // "normal" (nick bold, body regular), "bold" (all bold), "light" (all regular)
 
         // Native UI Controls
         private Panel topToolbar;
         private Label lblConnBadge;
-        private ComboBox cmbThemeSelect;
+        private ThemedComboBox cmbThemeSelect = null;
+        private Button btnIntegratedSettings;
         private Button btnServerList;
         private Button btnConnectServer;
-        private Button btnScriptEditor;
-        private Button btnSoundSettings;
-        private Button btnOpenFolder;
-        private Button btnPinTop;
-        private Button btnBossHide;
+        private Button btnPinTop = null;
 
         private SplitContainer mainOuterSplit;
         private SplitContainer rightInnerSplit;
 
-        // Left Sidebar: Multi-Server & Channel TreeView
+        // Left Sidebar: Multi-Server & Channel TreeView + Bottom Terminal/Local Modules Dock
         private Panel leftHeaderPanel;
         private Label lblLeftTitle;
         private Button btnNewChannel;
-        private TreeView treeServersChannels;
+        private ThemedTreeView treeServersChannels;
 
-        // Center Panel: Channel Header + Module Quick Bar + RichTextBox Chat + Input Bar
+        private Panel leftTerminalModulesPanel;
+        private Panel leftModTopAccentLine;
+        private Panel leftModHeaderPanel;
+        private Label lblLeftModHeader;
+        private Button btnLeftModManage;
+        private FlowLayoutPanel flowLeftModules;
+
+        // Center Panel: Channel Header + Module Quick Bar + RichTextBox Chat / Terminal + Input Bar
         private Panel channelHeaderBar;
         private Label lblChannelTopicHeader;
         private Label lblChannelSubTopic;
         private Button btnChannelTopicEdit;
         private Button btnReport112;
+        private Button btnTermClear;
+        private Button btnTermRestart;
+        private Button btnTermBackToChat;
 
         private FlowLayoutPanel serverExtModuleBar;
         private RichTextBox rtbChat;
+        private RichTextBox rtbTerminal;
         private Panel inputBottomPanel;
-        private TextBox txtInput;
+        private ChatInputTextBox txtInput;
         private Button btnSend;
+
+        // Interactive PowerShell / Terminal Module State
+        public bool IsTerminalViewActive = false;
+        public ClientModuleDef ActiveTerminalModule = null;
+        private Process psProcess = null;
+        private string psCurrentWorkDir = "";
+        private readonly List<string> psCommandHistory = new List<string>();
+        private int psHistoryIndex = -1;
+
+        // Chat Input History & Tab Completion State
+        private readonly List<string> chatHistory = new List<string>();
+        private int chatHistoryIndex = -1;
+        private string chatDraftText = "";
+
+        private bool isTabCycling = false;
+        private string tabOriginalPrefix = "";
+        private int tabWordStartIndex = 0;
+        private List<string> tabCandidates = new List<string>();
+        private int tabCandidateIndex = -1;
 
         // Right Sidebar: Online Users in Active Server & Channel
         private Panel rightHeaderPanel;
@@ -494,6 +767,7 @@ namespace NyaaChatNative
         {
             this.SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
             this.BaseDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\', '/');
+            this.psCurrentWorkDir = this.BaseDir;
             this.IniPath = Path.Combine(this.BaseDir, "settings.ini");
             this.AliasesPath = Path.Combine(this.BaseDir, "aliases.txt");
             this.UserScriptPath = Path.Combine(this.BaseDir, "scripts", "user_script.txt");
@@ -526,12 +800,15 @@ namespace NyaaChatNative
 
             BuildNativeUI();
             InitTrayIcon();
+            RefreshLeftTerminalModulesPanel();
             ApplyThemeColorsToUI();
+            ApplyLanguageToUI();
 
             this.Load += OnMainFormLoad;
             this.FormClosing += OnMainFormClosing;
             this.ResizeEnd += OnMainFormResizeEnd;
             this.KeyDown += OnGlobalKeyDown;
+            this.Activated += delegate { StopFlashingMainWindow(); };
         }
 
         private void EnsureDirectories()
@@ -542,17 +819,62 @@ namespace NyaaChatNative
                 string p = Path.Combine(this.BaseDir, d);
                 if (!Directory.Exists(p)) Directory.CreateDirectory(p);
             }
+
+            string psModPath = Path.Combine(this.BaseDir, "modules", "powershell_module.txt");
+            if (!File.Exists(psModPath))
+            {
+                StringBuilder sbPs = new StringBuilder();
+                sbPs.AppendLine("; ============================================================================");
+                sbPs.AppendLine("; Nyaa Chat 로컬 터미널 확장 모듈: powershell_module.txt (Windows PowerShell)");
+                sbPs.AppendLine("; ============================================================================");
+                sbPs.AppendLine("; - Type=Terminal 로 설정된 모듈은 좌측 하단 [파워쉘 / 터미널] 영역에 표시됩니다.");
+                sbPs.AppendLine("; - 클릭하면 중앙 화면이 대화형 PowerShell 콘솔로 전환되며 세션이 유지됩니다.");
+                sbPs.AppendLine("; - 좌측 상단의 채팅 채널(#자유대화 등)을 클릭하면 언제든 채팅 화면으로 돌아갑니다.");
+                sbPs.AppendLine("; ============================================================================");
+                sbPs.AppendLine();
+                sbPs.AppendLine("[Module]");
+                sbPs.AppendLine("Id=PowerShell");
+                sbPs.AppendLine("Name=파워쉘 (PowerShell)");
+                sbPs.AppendLine("Version=1.0");
+                sbPs.AppendLine("Enabled=true");
+                sbPs.AppendLine("Type=Terminal");
+                sbPs.AppendLine("ShellExe=powershell.exe");
+                sbPs.AppendLine("TargetServer=*");
+                sbPs.AppendLine("Description=클라이언트 내장 대화형 Windows PowerShell 콘솔 모듈");
+                sbPs.AppendLine();
+                sbPs.AppendLine("[Buttons]");
+                sbPs.AppendLine("현재경로 (pwd) = Get-Location");
+                sbPs.AppendLine("파일목록 (dir) = Get-ChildItem");
+                sbPs.AppendLine("IP확인 (ipconfig) = ipconfig");
+                sbPs.AppendLine("프로세스 (ps) = Get-Process | Select-Object -First 20 Name, Id, CPU, WS | Format-Table -AutoSize");
+                sbPs.AppendLine("탐색기 열기 = explorer .");
+                File.WriteAllText(psModPath, sbPs.ToString(), Encoding.UTF8);
+            }
         }
 
         public void ReloadAllConfigsAndScripts()
         {
             this.IniData = ReadIniFile(this.IniPath);
+            string lang = GetIni("General", "Language", DEFAULT_LANGUAGE).Trim().ToLowerInvariant();
+            this.CurrentLanguage = (lang == "en" || lang == "english") ? "en" : "ko";
+
             LoadAliasesFile();
             LoadUserScriptFile();
             LoadModulesFolder();
 
             string activeTheme = GetIni("Theme", "ActiveTheme", "default_dark.ini");
             LoadThemeFile(activeTheme);
+        }
+
+        public void SetLanguage(string langCode, bool saveToIni)
+        {
+            string normalized = (!string.IsNullOrEmpty(langCode) && langCode.Trim().ToLowerInvariant().StartsWith("en")) ? "en" : "ko";
+            this.CurrentLanguage = normalized;
+            if (saveToIni)
+            {
+                SetIniValue("General", "Language", this.CurrentLanguage, true);
+            }
+            ApplyLanguageToUI();
         }
 
         private void LoadThemeFile(string themeFileName)
@@ -577,19 +899,123 @@ namespace NyaaChatNative
             this.ColTextTimestamp = ParseColor(GetIniFromDict(tIni, "Colors", "TextTimestamp", "#64748B"), Color.Gray);
             this.ColAccent = ParseColor(GetIniFromDict(tIni, "Colors", "AccentPrimary", "#4F46E5"), Color.RoyalBlue);
             this.ColBorder = ParseColor(GetIniFromDict(tIni, "Colors", "BorderColor", "#334155"), Color.DimGray);
+            this.ColBgTitleBar = ParseColor(GetIniFromDict(tIni, "Colors", "BgTitleBar", ColorToHex(this.ColBgWindow)), this.ColBgWindow);
+            this.ColTextTitleBar = ParseColor(GetIniFromDict(tIni, "Colors", "TextTitleBar", ColorToHex(this.ColTextPrimary)), this.ColTextPrimary);
 
             string fontName = GetIniFromDict(tIni, "Font", "FontName", GetIni("Theme", "FontFamily", "맑은 고딕"));
             int fontSize = ParseInt(GetIniFromDict(tIni, "Font", "FontSize", GetIni("Theme", "FontSize", "10")), 10);
+            string fontWeight = GetIniFromDict(tIni, "Font", "FontWeight", GetIni("Theme", "FontWeight", "normal")).ToLowerInvariant();
             fontSize = Math.Max(8, Math.Min(22, fontSize));
+            RebuildChatFonts(fontName, fontSize, fontWeight);
+        }
+
+        public void ApplyWindowTitleBarTheme(Form targetForm)
+        {
+            if (targetForm == null) return;
+            Action applyDwm = delegate
+            {
+                try
+                {
+                    if (!targetForm.IsHandleCreated) return;
+                    IntPtr hwnd = targetForm.Handle;
+                    int lum = (int)(0.299 * this.ColBgTitleBar.R + 0.587 * this.ColBgTitleBar.G + 0.114 * this.ColBgTitleBar.B);
+                    int isDark = (lum < 140) ? 1 : 0;
+                    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, ref isDark, sizeof(int));
+                    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref isDark, sizeof(int));
+
+                    int captionColorRef = this.ColBgTitleBar.R | (this.ColBgTitleBar.G << 8) | (this.ColBgTitleBar.B << 16);
+                    int textColorRef = this.ColTextTitleBar.R | (this.ColTextTitleBar.G << 8) | (this.ColTextTitleBar.B << 16);
+                    int borderColorRef = this.ColBorder.R | (this.ColBorder.G << 8) | (this.ColBorder.B << 16);
+
+                    DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ref captionColorRef, sizeof(int));
+                    DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, ref textColorRef, sizeof(int));
+                    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref borderColorRef, sizeof(int));
+                }
+                catch { }
+                ApplyControlScrollbarAndComboTheme(targetForm);
+            };
+
+            if (targetForm.IsHandleCreated)
+            {
+                applyDwm();
+            }
+            targetForm.HandleCreated += delegate { applyDwm(); };
+            targetForm.Load += delegate { applyDwm(); };
+        }
+
+        public void ApplyControlScrollbarAndComboTheme(Control root)
+        {
+            if (root == null) return;
+            int lum = (int)(0.299 * this.ColBgSidebar.R + 0.587 * this.ColBgSidebar.G + 0.114 * this.ColBgSidebar.B);
+            bool isDark = lum < 140;
+            string subApp = isDark ? "DarkMode_Explorer" : "Explorer";
+
+            Action<Control> styleSingle = delegate (Control c)
+            {
+                if (c is ThemedComboBox)
+                {
+                    ThemedComboBox tcb = (ThemedComboBox)c;
+                    tcb.BackColor = (c == this.cmbThemeSelect) ? this.ColBgSidebar : this.ColBgInput;
+                    tcb.ForeColor = this.ColTextPrimary;
+                    tcb.BorderColor = this.ColBorder;
+                    tcb.HighlightColor = this.ColAccent;
+                    tcb.Invalidate();
+                }
+
+                if (c is TreeView || c is RichTextBox || c is ListBox || c is ListView || c is TextBox || c is ScrollableControl)
+                {
+                    Action applyTheme = delegate
+                    {
+                        try
+                        {
+                            if (c.IsHandleCreated)
+                            {
+                                SetWindowTheme(c.Handle, subApp, null);
+                            }
+                        }
+                        catch { }
+                    };
+                    if (c.IsHandleCreated) applyTheme();
+                    else c.HandleCreated += delegate { applyTheme(); };
+                }
+            };
+
+            Stack<Control> stack = new Stack<Control>();
+            stack.Push(root);
+            while (stack.Count > 0)
+            {
+                Control cur = stack.Pop();
+                styleSingle(cur);
+                foreach (Control child in cur.Controls)
+                {
+                    stack.Push(child);
+                }
+            }
+        }
+
+        public void RebuildChatFonts(string fontName, float fontSize, string weightMode)
+        {
+            if (string.IsNullOrEmpty(fontName)) fontName = "맑은 고딕";
+            fontSize = Math.Max(8f, Math.Min(22f, fontSize));
+            string wm = (weightMode ?? "normal").Trim().ToLowerInvariant();
+            if (wm != "bold" && wm != "light") wm = "normal";
+
+            this.CurrentFontName = fontName;
+            this.CurrentFontSize = fontSize;
+            this.CurrentFontWeightMode = wm;
+
+            FontStyle bodyStyle = (wm == "bold") ? FontStyle.Bold : FontStyle.Regular;
+            FontStyle nickStyle = (wm == "light") ? FontStyle.Regular : FontStyle.Bold;
+
             try
             {
-                this.ChatFont = new Font(fontName, fontSize, FontStyle.Regular);
-                this.ChatBoldFont = new Font(fontName, fontSize, FontStyle.Bold);
+                this.ChatFont = new Font(fontName, fontSize, bodyStyle);
+                this.ChatBoldFont = new Font(fontName, fontSize, nickStyle);
             }
             catch
             {
-                this.ChatFont = new Font("맑은 고딕", 10f, FontStyle.Regular);
-                this.ChatBoldFont = new Font("맑은 고딕", 10f, FontStyle.Bold);
+                this.ChatFont = new Font("맑은 고딕", 10f, bodyStyle);
+                this.ChatBoldFont = new Font("맑은 고딕", 10f, nickStyle);
             }
         }
 
@@ -658,17 +1084,28 @@ namespace NyaaChatNative
                 if (string.Equals(fn, "README.txt", StringComparison.OrdinalIgnoreCase)) continue;
 
                 Dictionary<string, Dictionary<string, string>> mIni = ReadIniFile(file);
-                string targetSrv = GetIniFromDict(mIni, "Module", "TargetServer", "");
-                if (string.IsNullOrEmpty(targetSrv)) continue;
+                string targetSrv = GetIniFromDict(mIni, "Module", "TargetServer", "*");
+                if (string.IsNullOrEmpty(targetSrv)) targetSrv = "*";
+
+                string enabledRaw = GetIniFromDict(mIni, "Module", "Enabled", "true").Trim().ToLowerInvariant();
+                bool isEnabled = (enabledRaw != "false" && enabledRaw != "0" && enabledRaw != "off" && enabledRaw != "no");
+
+                string modId = GetIniFromDict(mIni, "Module", "Id", Path.GetFileNameWithoutExtension(fn));
+                string defaultType = string.Equals(modId, "PowerShell", StringComparison.OrdinalIgnoreCase) ? "Terminal" : "Standard";
+                string modType = GetIniFromDict(mIni, "Module", "Type", defaultType).Trim();
+                string shellExe = GetIniFromDict(mIni, "Module", "ShellExe", "powershell.exe").Trim();
 
                 ClientModuleDef def = new ClientModuleDef
                 {
                     FileName = fn,
-                    Id = GetIniFromDict(mIni, "Module", "Id", Path.GetFileNameWithoutExtension(fn)),
-                    Name = GetIniFromDict(mIni, "Module", "Name", fn),
+                    Id = modId,
+                    Name = GetIniFromDict(mIni, "Module", "Name", Path.GetFileNameWithoutExtension(fn)),
                     Version = GetIniFromDict(mIni, "Module", "Version", "1.0"),
                     TargetServer = targetSrv.Trim(),
-                    Description = GetIniFromDict(mIni, "Module", "Description", "")
+                    Description = GetIniFromDict(mIni, "Module", "Description", ""),
+                    Enabled = isEnabled,
+                    ModuleType = modType,
+                    ShellExe = shellExe
                 };
 
                 if (mIni.ContainsKey("Buttons"))
@@ -689,8 +1126,95 @@ namespace NyaaChatNative
                         }
                     }
                 }
+                string[] trigSections = new string[] { "Triggers", "Events" };
+                foreach (string tSec in trigSections)
+                {
+                    if (mIni.ContainsKey(tSec))
+                    {
+                        foreach (KeyValuePair<string, string> kv in mIni[tSec])
+                        {
+                            string kw = kv.Key.Trim();
+                            string val = kv.Value.Trim();
+                            if (string.IsNullOrEmpty(kw) || string.IsNullOrEmpty(val)) continue;
+                            int pipeIdx = val.IndexOf('|');
+                            if (pipeIdx > 0)
+                            {
+                                string act = val.Substring(0, pipeIdx).Trim().ToUpperInvariant();
+                                string payload = val.Substring(pipeIdx + 1).Trim();
+                                def.Triggers.Add(new string[] { kw, act, payload });
+                            }
+                            else
+                            {
+                                def.Triggers.Add(new string[] { kw, "NOTICE", val });
+                            }
+                        }
+                    }
+                }
                 this.InstalledModules.Add(def);
             }
+
+            if (this.leftTerminalModulesPanel != null)
+            {
+                RefreshLeftTerminalModulesPanel();
+            }
+        }
+
+        private void SetModuleEnabledInFile(string filePath, bool enabled)
+        {
+            if (!File.Exists(filePath)) return;
+            string[] lines = File.ReadAllLines(filePath, Encoding.UTF8);
+            List<string> outLines = new List<string>();
+            bool inModuleSec = false;
+            bool foundModuleSec = false;
+            bool wroteEnabled = false;
+
+            foreach (string line in lines)
+            {
+                string trimmed = line.Trim();
+                if (trimmed.StartsWith("[") && trimmed.EndsWith("]"))
+                {
+                    if (inModuleSec && !wroteEnabled)
+                    {
+                        outLines.Add("Enabled=" + (enabled ? "true" : "false"));
+                        wroteEnabled = true;
+                    }
+                    string secName = trimmed.Substring(1, trimmed.Length - 2).Trim();
+                    inModuleSec = string.Equals(secName, "Module", StringComparison.OrdinalIgnoreCase);
+                    if (inModuleSec) foundModuleSec = true;
+                    outLines.Add(line);
+                    continue;
+                }
+
+                if (inModuleSec && !trimmed.StartsWith(";") && !trimmed.StartsWith("#"))
+                {
+                    int eq = trimmed.IndexOf('=');
+                    if (eq > 0)
+                    {
+                        string k = trimmed.Substring(0, eq).Trim();
+                        if (string.Equals(k, "Enabled", StringComparison.OrdinalIgnoreCase))
+                        {
+                            outLines.Add("Enabled=" + (enabled ? "true" : "false"));
+                            wroteEnabled = true;
+                            continue;
+                        }
+                    }
+                }
+                outLines.Add(line);
+            }
+
+            if (inModuleSec && !wroteEnabled)
+            {
+                outLines.Add("Enabled=" + (enabled ? "true" : "false"));
+                wroteEnabled = true;
+            }
+            else if (!foundModuleSec)
+            {
+                outLines.Insert(0, "[Module]");
+                outLines.Insert(1, "Enabled=" + (enabled ? "true" : "false"));
+                outLines.Insert(2, "");
+            }
+
+            File.WriteAllLines(filePath, outLines.ToArray(), Encoding.UTF8);
         }
 
         private void BuildNativeUI()
@@ -707,71 +1231,32 @@ namespace NyaaChatNative
             {
                 Text = "● 다중서버 준비됨",
                 AutoSize = false,
-                Width = 175,
+                Width = 154,
                 Height = 26,
                 TextAlign = ContentAlignment.MiddleLeft,
                 Location = new Point(8, 5),
                 Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
             };
 
-            this.btnServerList = CreateToolbarButton("서버 리스트 (F2)", 190, 125);
+            this.btnServerList = CreateToolbarButton("서버 리스트 (F2)", 166, 118);
             this.btnServerList.BackColor = Color.FromArgb(79, 70, 229);
             this.btnServerList.Click += delegate { OpenServerListExplorer(); };
 
-            this.btnConnectServer = CreateToolbarButton("+ 서버 추가접속", 321, 110);
+            this.btnConnectServer = CreateToolbarButton("+ 서버 추가", 290, 96);
             this.btnConnectServer.Click += delegate { PromptQuickConnectServer(); };
 
-            this.btnScriptEditor = CreateToolbarButton("스크립트/스킨 편집 (Alt+R)", 437, 172);
-            this.btnScriptEditor.Click += delegate { OpenScriptEditorDialog("aliases.txt"); };
-
-            this.btnSoundSettings = CreateToolbarButton("효과음 설정", 615, 92);
-            this.btnSoundSettings.Click += delegate { OpenSoundSettingsDialog(); };
-
-            this.cmbThemeSelect = new ComboBox
-            {
-                DropDownStyle = ComboBoxStyle.DropDownList,
-                Location = new Point(713, 5),
-                Width = 145,
-                Font = new Font("맑은 고딕", 9f)
-            };
-            RefreshThemeDropdown();
-            this.cmbThemeSelect.SelectedIndexChanged += delegate
-            {
-                if (this.cmbThemeSelect.SelectedItem != null)
-                {
-                    string selectedTheme = Convert.ToString(this.cmbThemeSelect.SelectedItem);
-                    SetIniValue("Theme", "ActiveTheme", selectedTheme, true);
-                    LoadThemeFile(selectedTheme);
-                    ApplyThemeColorsToUI();
-                    RedrawActiveChatHistory();
-                }
-            };
-
-            this.btnOpenFolder = CreateToolbarButton("폴더 열기", 864, 80);
-            this.btnOpenFolder.Click += delegate { OpenSubFolder(""); };
-
-            this.btnPinTop = CreateToolbarButton(this.TopMost ? "[고정됨]" : "창고정", 950, 70);
-            this.btnPinTop.Click += delegate
-            {
-                this.TopMost = !this.TopMost;
-                this.btnPinTop.Text = this.TopMost ? "[고정됨]" : "창고정";
-                SetIniValue("Window", "AlwaysOnTop", this.TopMost ? "true" : "false", true);
-            };
-
-            this.btnBossHide = CreateToolbarButton("숨김(Alt+Q)", 1026, 92);
-            this.btnBossHide.Click += delegate { ToggleWindowVisibility(); };
+            this.btnIntegratedSettings = CreateToolbarButton("설정 (F10)", 392, 98);
+            this.btnIntegratedSettings.Click += delegate { OpenIntegratedSettingsDialog(0); };
 
             this.topToolbar.Controls.AddRange(new Control[] {
                 this.lblConnBadge, this.btnServerList, this.btnConnectServer,
-                this.btnScriptEditor, this.btnSoundSettings, this.cmbThemeSelect,
-                this.btnOpenFolder, this.btnPinTop, this.btnBossHide
+                this.btnIntegratedSettings
             });
 
             // 2. Main Split Containers (Left: Server/Channel Tree | Center: Chat | Right: Users)
             this.mainOuterSplit = new SplitContainer
             {
                 Dock = DockStyle.Fill,
-                SplitterDistance = 235,
                 SplitterWidth = 4,
                 FixedPanel = FixedPanel.Panel1
             };
@@ -779,7 +1264,6 @@ namespace NyaaChatNative
             this.rightInnerSplit = new SplitContainer
             {
                 Dock = DockStyle.Fill,
-                SplitterDistance = 660,
                 SplitterWidth = 4,
                 FixedPanel = FixedPanel.Panel2
             };
@@ -797,18 +1281,23 @@ namespace NyaaChatNative
             this.btnNewChannel = new Button
             {
                 Text = "+ 개설/입장",
-                Size = new Size(76, 24),
-                Location = new Point(152, 5),
+                Size = new Size(86, 24),
+                Location = new Point(146, 5),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
                 FlatStyle = FlatStyle.Flat,
                 Font = new Font("맑은 고딕", 8.5f, FontStyle.Bold),
                 Cursor = Cursors.Hand
             };
             this.btnNewChannel.FlatAppearance.BorderSize = 1;
             this.btnNewChannel.Click += delegate { PromptJoinChannelOnActiveServer(); };
+            this.leftHeaderPanel.Resize += delegate
+            {
+                this.btnNewChannel.Left = Math.Max(126, this.leftHeaderPanel.Width - this.btnNewChannel.Width - 6);
+            };
             this.leftHeaderPanel.Controls.Add(this.lblLeftTitle);
             this.leftHeaderPanel.Controls.Add(this.btnNewChannel);
 
-            this.treeServersChannels = new TreeView
+            this.treeServersChannels = new ThemedTreeView
             {
                 Dock = DockStyle.Fill,
                 BorderStyle = BorderStyle.None,
@@ -820,16 +1309,92 @@ namespace NyaaChatNative
             };
             this.treeServersChannels.NodeMouseClick += OnTreeServersNodeClick;
             this.treeServersChannels.NodeMouseDoubleClick += OnTreeServersNodeDoubleClick;
+            this.treeServersChannels.MouseDown += delegate(object s, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Middle)
+                {
+                    TreeNode n = this.treeServersChannels.GetNodeAt(e.Location);
+                    if (n != null)
+                    {
+                        object[] tag = n.Tag as object[];
+                        if (tag != null && tag.Length >= 3 && Convert.ToString(tag[0]) == "channel")
+                        {
+                            NyaaServerSession sess = tag[1] as NyaaServerSession;
+                            string roomId = Convert.ToString(tag[2]);
+                            if (sess != null) LeaveChannel(sess, roomId);
+                        }
+                    }
+                }
+            };
 
             ContextMenuStrip treeMenu = new ContextMenuStrip();
-            treeMenu.Items.Add("채널 토픽 및 모드 설정 (/topic · /mode)", null, delegate { PromptEditChannelTopic(); });
-            treeMenu.Items.Add("새 채널 개설 / 입장 (/join)", null, delegate { PromptJoinChannelOnActiveServer(); });
-            treeMenu.Items.Add("네트워크 서버 & 채널 리스트 (F2)", null, delegate { OpenServerListExplorer(); });
-            treeMenu.Items.Add(new ToolStripSeparator());
-            treeMenu.Items.Add("현재 채널에서 퇴장 (/part)", null, delegate { ExecuteSlashCommand("/part"); });
+            treeMenu.Opening += OnTreeContextMenuOpening;
             this.treeServersChannels.ContextMenuStrip = treeMenu;
 
+            this.leftTerminalModulesPanel = new Panel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 104
+            };
+            this.leftModTopAccentLine = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 2,
+                BackColor = Color.FromArgb(244, 63, 94)
+            };
+            this.leftModHeaderPanel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 28
+            };
+            this.lblLeftModHeader = new Label
+            {
+                Text = "로컬 터미널 · 모듈",
+                Location = new Point(8, 6),
+                AutoSize = true,
+                Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold)
+            };
+            this.btnLeftModManage = new Button
+            {
+                Text = "+ 관리",
+                Size = new Size(56, 21),
+                Location = new Point(174, 3),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("맑은 고딕", 8f, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            this.btnLeftModManage.FlatAppearance.BorderSize = 1;
+            this.btnLeftModManage.Click += delegate { OpenModulesManagerDialog(); };
+            this.leftModHeaderPanel.Resize += delegate
+            {
+                this.btnLeftModManage.Left = Math.Max(110, this.leftModHeaderPanel.Width - this.btnLeftModManage.Width - 6);
+            };
+            this.leftModHeaderPanel.Controls.Add(this.lblLeftModHeader);
+            this.leftModHeaderPanel.Controls.Add(this.btnLeftModManage);
+
+            this.flowLeftModules = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                AutoScroll = true,
+                Padding = new Padding(6, 4, 6, 4)
+            };
+            this.flowLeftModules.Resize += delegate
+            {
+                foreach (Control c in this.flowLeftModules.Controls)
+                {
+                    c.Width = Math.Max(120, this.flowLeftModules.ClientSize.Width - 14);
+                }
+            };
+
+            this.leftTerminalModulesPanel.Controls.Add(this.flowLeftModules);
+            this.leftTerminalModulesPanel.Controls.Add(this.leftModHeaderPanel);
+            this.leftTerminalModulesPanel.Controls.Add(this.leftModTopAccentLine);
+
             this.mainOuterSplit.Panel1.Controls.Add(this.treeServersChannels);
+            this.mainOuterSplit.Panel1.Controls.Add(this.leftTerminalModulesPanel);
             this.mainOuterSplit.Panel1.Controls.Add(this.leftHeaderPanel);
 
             // 4. Center Panel: Channel Header (with Server Name & Host!) + Server Module Bar + Chat View + Input
@@ -845,7 +1410,9 @@ namespace NyaaChatNative
             {
                 Text = "서버 리스트(F2)에서 다른 서버의 채널을 더블클릭하면 다중 서버로 동시 접속할 수 있습니다.",
                 Location = new Point(14, 30),
-                AutoSize = true,
+                AutoSize = false,
+                AutoEllipsis = true,
+                Size = new Size(460, 18),
                 Font = new Font("맑은 고딕", 8.8f)
             };
 
@@ -874,9 +1441,64 @@ namespace NyaaChatNative
             };
             this.btnReport112.Click += delegate { ExecuteSlashCommand("/112"); };
 
+            this.btnTermClear = new Button
+            {
+                Text = "화면 지우기",
+                Size = new Size(82, 24),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                Location = new Point(400, 12),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("맑은 고딕", 8.3f, FontStyle.Bold),
+                Visible = false,
+                Cursor = Cursors.Hand
+            };
+            this.btnTermClear.Click += delegate
+            {
+                if (this.rtbTerminal != null)
+                {
+                    this.rtbTerminal.Clear();
+                    AppendTerminalText(Tr("* [PowerShell] 콘솔 화면을 지웠습니다. (세션 유지 중)\r\n", "* [PowerShell] Console output cleared. (Session active)\r\n"), Color.FromArgb(56, 189, 248));
+                }
+                this.txtInput.Focus();
+            };
+
+            this.btnTermRestart = new Button
+            {
+                Text = "세션 재시작",
+                Size = new Size(84, 24),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                Location = new Point(488, 12),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("맑은 고딕", 8.3f, FontStyle.Bold),
+                Visible = false,
+                Cursor = Cursors.Hand
+            };
+            this.btnTermRestart.Click += delegate
+            {
+                RestartPowerShellSession();
+                this.txtInput.Focus();
+            };
+
+            this.btnTermBackToChat = new Button
+            {
+                Text = "채팅 복귀",
+                Size = new Size(76, 24),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                Location = new Point(578, 12),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("맑은 고딕", 8.3f, FontStyle.Bold),
+                Visible = false,
+                Cursor = Cursors.Hand
+            };
+            this.btnTermBackToChat.Click += delegate
+            {
+                ExitTerminalViewToChat();
+            };
+
             this.channelHeaderBar.Controls.AddRange(new Control[] {
                 this.lblChannelTopicHeader, this.lblChannelSubTopic,
-                this.btnChannelTopicEdit, this.btnReport112
+                this.btnChannelTopicEdit, this.btnReport112,
+                this.btnTermClear, this.btnTermRestart, this.btnTermBackToChat
             });
 
             // Per-Server Extended Commands & Module Quick Bar (Only visible when active server has extensions/modules!)
@@ -910,7 +1532,7 @@ namespace NyaaChatNative
             this.btnSend.FlatAppearance.BorderSize = 0;
             this.btnSend.Click += delegate { HandleSendInput(); };
 
-            this.txtInput = new TextBox
+            this.txtInput = new ChatInputTextBox
             {
                 Dock = DockStyle.Fill,
                 BorderStyle = BorderStyle.FixedSingle,
@@ -918,11 +1540,97 @@ namespace NyaaChatNative
             };
             this.txtInput.KeyDown += delegate (object s, KeyEventArgs e)
             {
+                if (e.KeyCode == Keys.Tab && !e.Control && !e.Alt)
+                {
+                    e.SuppressKeyPress = true;
+                    e.Handled = true;
+                    if (!this.IsTerminalViewActive)
+                    {
+                        HandleTabCompletion(e.Shift);
+                    }
+                    return;
+                }
+
+                // Reset Tab cycling if any key other than Tab and modifiers is pressed
+                if (e.KeyCode != Keys.Tab && e.KeyCode != Keys.ShiftKey && e.KeyCode != Keys.ControlKey && e.KeyCode != Keys.Menu)
+                {
+                    ResetTabCompletion();
+                }
+
                 if (e.KeyCode == Keys.Enter && !e.Shift)
                 {
                     e.SuppressKeyPress = true;
                     e.Handled = true;
                     HandleSendInput();
+                }
+                else if (this.IsTerminalViewActive && e.KeyCode == Keys.Up)
+                {
+                    if (this.psCommandHistory.Count > 0)
+                    {
+                        e.SuppressKeyPress = true;
+                        e.Handled = true;
+                        if (this.psHistoryIndex < 0) this.psHistoryIndex = this.psCommandHistory.Count - 1;
+                        else if (this.psHistoryIndex > 0) this.psHistoryIndex--;
+                        this.txtInput.Text = this.psCommandHistory[this.psHistoryIndex];
+                        this.txtInput.SelectionStart = this.txtInput.Text.Length;
+                    }
+                }
+                else if (this.IsTerminalViewActive && e.KeyCode == Keys.Down)
+                {
+                    if (this.psCommandHistory.Count > 0 && this.psHistoryIndex >= 0)
+                    {
+                        e.SuppressKeyPress = true;
+                        e.Handled = true;
+                        if (this.psHistoryIndex < this.psCommandHistory.Count - 1)
+                        {
+                            this.psHistoryIndex++;
+                            this.txtInput.Text = this.psCommandHistory[this.psHistoryIndex];
+                        }
+                        else
+                        {
+                            this.psHistoryIndex = -1;
+                            this.txtInput.Clear();
+                        }
+                        this.txtInput.SelectionStart = this.txtInput.Text.Length;
+                    }
+                }
+                else if (!this.IsTerminalViewActive && e.KeyCode == Keys.Up)
+                {
+                    if (this.chatHistory.Count > 0)
+                    {
+                        e.SuppressKeyPress = true;
+                        e.Handled = true;
+                        if (this.chatHistoryIndex < 0)
+                        {
+                            this.chatDraftText = this.txtInput.Text;
+                            this.chatHistoryIndex = this.chatHistory.Count - 1;
+                        }
+                        else if (this.chatHistoryIndex > 0)
+                        {
+                            this.chatHistoryIndex--;
+                        }
+                        this.txtInput.Text = this.chatHistory[this.chatHistoryIndex];
+                        this.txtInput.SelectionStart = this.txtInput.Text.Length;
+                    }
+                }
+                else if (!this.IsTerminalViewActive && e.KeyCode == Keys.Down)
+                {
+                    if (this.chatHistoryIndex >= 0)
+                    {
+                        e.SuppressKeyPress = true;
+                        e.Handled = true;
+                        if (this.chatHistoryIndex < this.chatHistory.Count - 1)
+                        {
+                            this.chatHistoryIndex++;
+                            this.txtInput.Text = this.chatHistory[this.chatHistoryIndex];
+                        }
+                        else
+                        {
+                            this.chatHistoryIndex = -1;
+                            this.txtInput.Text = this.chatDraftText;
+                        }
+                        this.txtInput.SelectionStart = this.txtInput.Text.Length;
+                    }
                 }
             };
 
@@ -944,6 +1652,22 @@ namespace NyaaChatNative
                 HandleChatLinkClicked(e.LinkText);
             };
 
+            // Interactive PowerShell / Terminal RichTextBox (shares center view with rtbChat)
+            this.rtbTerminal = new RichTextBox
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                BorderStyle = BorderStyle.None,
+                ScrollBars = RichTextBoxScrollBars.Vertical,
+                DetectUrls = false,
+                HideSelection = false,
+                Visible = false,
+                BackColor = Color.FromArgb(9, 13, 22),
+                ForeColor = Color.FromArgb(226, 232, 240),
+                Font = new Font("Consolas", 10f)
+            };
+
+            this.rightInnerSplit.Panel1.Controls.Add(this.rtbTerminal);
             this.rightInnerSplit.Panel1.Controls.Add(this.rtbChat);
             this.rightInnerSplit.Panel1.Controls.Add(this.serverExtModuleBar);
             this.rightInnerSplit.Panel1.Controls.Add(this.inputBottomPanel);
@@ -972,7 +1696,7 @@ namespace NyaaChatNative
             {
                 if (this.lstOnlineUsers.SelectedItem == null) return "";
                 string raw = Convert.ToString(this.lstOnlineUsers.SelectedItem);
-                return Regex.Replace(raw, @"^[\s\*@\^\+]+", "").Replace(" (나)", "").Trim();
+                return Regex.Replace(raw, @"^[\s\*@\^\+]+", "").Replace(" (나)", "").Replace(" (Me)", "").Trim();
             };
             this.lstOnlineUsers.MouseDown += delegate (object s, MouseEventArgs e)
             {
@@ -1044,6 +1768,101 @@ namespace NyaaChatNative
 
             this.Controls.Add(this.mainOuterSplit);
             this.Controls.Add(this.topToolbar);
+
+            RefreshLeftTerminalModulesPanel();
+            ApplyDefaultSplitters();
+        }
+
+        public void ApplyLanguageToUI()
+        {
+            if (this.topToolbar == null) return;
+
+            this.btnServerList.Text = Tr("서버 리스트 (F2)", "Servers (F2)");
+            this.btnConnectServer.Text = Tr("+ 서버 추가", "+ Add Server");
+            this.btnIntegratedSettings.Text = Tr("설정 (F10)", "Settings (F10)");
+            if (this.btnPinTop != null)
+            {
+                this.btnPinTop.Text = this.TopMost ? Tr("[고정됨]", "[Pinned]") : Tr("창고정", "Pin Top");
+            }
+
+            this.lblLeftTitle.Text = Tr("접속 서버 및 채널 트리", "Servers & Channels");
+            this.btnNewChannel.Text = Tr("+ 개설/입장", "+ Join/New");
+            if (this.lblLeftModHeader != null) this.lblLeftModHeader.Text = Tr("로컬 터미널 · 모듈", "Terminal · Modules");
+            if (this.btnLeftModManage != null) this.btnLeftModManage.Text = Tr("+ 관리", "+ Manage");
+
+            this.btnChannelTopicEdit.Text = Tr("토픽/모드", "Topic/Mode");
+            this.btnReport112.Text = Tr("신고(/112)", "Report");
+            if (this.btnTermClear != null) this.btnTermClear.Text = Tr("화면 지우기", "Clear");
+            if (this.btnTermRestart != null) this.btnTermRestart.Text = Tr("세션 재시작", "Restart");
+            if (this.btnTermBackToChat != null) this.btnTermBackToChat.Text = Tr("채팅 복귀", "To Chat");
+            this.btnSend.Text = this.IsTerminalViewActive ? Tr("실행", "Run") : Tr("전송", "Send");
+
+            if (this.treeServersChannels != null && this.treeServersChannels.ContextMenuStrip != null && this.treeServersChannels.ContextMenuStrip.Items.Count >= 5)
+            {
+                this.treeServersChannels.ContextMenuStrip.Items[0].Text = Tr("채널 토픽 및 모드 설정 (/topic · /mode)", "Channel Topic & Mode (/topic · /mode)");
+                this.treeServersChannels.ContextMenuStrip.Items[1].Text = Tr("새 채널 개설 / 입장 (/join)", "Join / Create Channel (/join)");
+                this.treeServersChannels.ContextMenuStrip.Items[2].Text = Tr("네트워크 서버 & 채널 리스트 (F2)", "Network Server & Channel List (F2)");
+                this.treeServersChannels.ContextMenuStrip.Items[4].Text = Tr("현재 채널에서 퇴장 (/part)", "Leave Current Channel (/part)");
+            }
+
+            if (this.lstOnlineUsers != null && this.lstOnlineUsers.ContextMenuStrip != null && this.lstOnlineUsers.ContextMenuStrip.Items.Count >= 10)
+            {
+                this.lstOnlineUsers.ContextMenuStrip.Items[0].Text = Tr("사용자 정보 조회 (/whois)", "User Info (/whois)");
+                this.lstOnlineUsers.ContextMenuStrip.Items[1].Text = Tr("현재 채널로 초대 (/invite)", "Invite to Channel (/invite)");
+                this.lstOnlineUsers.ContextMenuStrip.Items[3].Text = Tr("방장(@) 권한 부여 (/op)", "Grant Channel Op (@ /op)");
+                this.lstOnlineUsers.ContextMenuStrip.Items[4].Text = Tr("방장(@) 권한 회수 (/deop)", "Revoke Channel Op (/deop)");
+                this.lstOnlineUsers.ContextMenuStrip.Items[5].Text = Tr("발언권(+v) 부여 (/mode +v)", "Grant Voice (+v /mode +v)");
+                this.lstOnlineUsers.ContextMenuStrip.Items[6].Text = Tr("발언권(-v) 회수 (/mode -v)", "Revoke Voice (-v /mode -v)");
+                this.lstOnlineUsers.ContextMenuStrip.Items[8].Text = Tr("채널에서 강퇴 (/kick)", "Kick from Channel (/kick)");
+                this.lstOnlineUsers.ContextMenuStrip.Items[9].Text = Tr("서버 영구 차단 (/ban · 서버관리자)", "Ban from Server (/ban · Oper)");
+            }
+
+            if (this.ActiveSession == null && !this.IsTerminalViewActive)
+            {
+                this.lblChannelTopicHeader.Text = Tr("#자유대화   [서버 연결 대기 중]", "#자유대화   [Waiting for Server Connection]");
+                this.lblChannelSubTopic.Text = Tr(
+                    "서버 리스트(F2)에서 다른 서버의 채널을 더블클릭하면 다중 서버로 동시 접속할 수 있습니다.",
+                    "Double-click any server channel in Servers (F2) to connect simultaneously."
+                );
+            }
+
+            UpdateConnectionBadge();
+            RefreshLeftServerTree();
+            RefreshLeftTerminalModulesPanel();
+            UpdateHeaderAndModuleBar();
+            RefreshRightUsersList();
+            RebuildTrayMenu();
+        }
+
+        private void ApplyDefaultSplitters()
+        {
+            try
+            {
+                this.mainOuterSplit.Panel1MinSize = 190;
+                this.mainOuterSplit.Panel2MinSize = 400;
+                int leftWidth = ParseInt(GetIni("Window", "LeftPanelWidth", "240"), 240);
+                leftWidth = Math.Max(200, Math.Min(380, leftWidth));
+                if (this.mainOuterSplit.Width > leftWidth + 400)
+                {
+                    this.mainOuterSplit.SplitterDistance = leftWidth;
+                }
+
+                this.rightInnerSplit.Panel1MinSize = 260;
+                this.rightInnerSplit.Panel2MinSize = 160;
+                int rightWidth = ParseInt(GetIni("Window", "RightPanelWidth", "200"), 200);
+                rightWidth = Math.Max(170, Math.Min(340, rightWidth));
+                if (this.rightInnerSplit.Width > rightWidth + 280)
+                {
+                    this.rightInnerSplit.SplitterDistance = this.rightInnerSplit.Width - rightWidth;
+                }
+
+                this.btnNewChannel.Left = Math.Max(126, this.leftHeaderPanel.Width - this.btnNewChannel.Width - 6);
+                if (this.btnLeftModManage != null && this.leftModHeaderPanel != null)
+                {
+                    this.btnLeftModManage.Left = Math.Max(110, this.leftModHeaderPanel.Width - this.btnLeftModManage.Width - 6);
+                }
+            }
+            catch { }
         }
 
         private Button CreateToolbarButton(string text, int x, int width)
@@ -1087,7 +1906,11 @@ namespace NyaaChatNative
 
         public void ApplyThemeColorsToUI()
         {
+            ApplyWindowTitleBarTheme(this);
+
             this.BackColor = this.ColBgWindow;
+            this.mainOuterSplit.BackColor = this.ColBorder;
+            this.rightInnerSplit.BackColor = this.ColBorder;
             this.topToolbar.BackColor = this.ColBgToolbar;
             this.lblConnBadge.ForeColor = this.ColTextPrimary;
 
@@ -1105,8 +1928,19 @@ namespace NyaaChatNative
             this.btnServerList.ForeColor = Color.White;
             this.btnServerList.FlatAppearance.BorderColor = this.ColAccent;
 
-            this.cmbThemeSelect.BackColor = this.ColBgSidebar;
-            this.cmbThemeSelect.ForeColor = this.ColTextPrimary;
+            if (this.btnIntegratedSettings != null)
+            {
+                this.btnIntegratedSettings.FlatAppearance.BorderColor = this.ColAccent;
+            }
+
+            if (this.cmbThemeSelect != null)
+            {
+                this.cmbThemeSelect.BackColor = this.ColBgSidebar;
+                this.cmbThemeSelect.ForeColor = this.ColTextPrimary;
+                this.cmbThemeSelect.BorderColor = this.ColBorder;
+                this.cmbThemeSelect.HighlightColor = this.ColAccent;
+                this.cmbThemeSelect.Invalidate();
+            }
 
             this.leftHeaderPanel.BackColor = this.ColBgHeader;
             this.lblLeftTitle.ForeColor = this.ColTextPrimary;
@@ -1116,6 +1950,19 @@ namespace NyaaChatNative
 
             this.treeServersChannels.BackColor = this.ColBgSidebar;
             this.treeServersChannels.ForeColor = this.ColTextPrimary;
+            this.treeServersChannels.LineColor = this.ColBorder;
+
+            if (this.leftTerminalModulesPanel != null)
+            {
+                this.leftTerminalModulesPanel.BackColor = this.ColBgSidebar;
+                this.leftModHeaderPanel.BackColor = this.ColBgHeader;
+                this.lblLeftModHeader.ForeColor = this.ColTextPrimary;
+                this.btnLeftModManage.BackColor = this.ColBgSidebar;
+                this.btnLeftModManage.ForeColor = this.ColTextSecondary;
+                this.btnLeftModManage.FlatAppearance.BorderColor = this.ColBorder;
+                this.flowLeftModules.BackColor = this.ColBgSidebar;
+                RefreshLeftTerminalModulesPanel();
+            }
 
             this.channelHeaderBar.BackColor = this.ColBgHeader;
             this.lblChannelTopicHeader.ForeColor = this.ColTextPrimary;
@@ -1126,14 +1973,46 @@ namespace NyaaChatNative
             this.btnReport112.BackColor = this.ColBgSidebar;
             this.btnReport112.FlatAppearance.BorderColor = Color.FromArgb(239, 68, 68);
 
+            if (this.btnTermClear != null)
+            {
+                this.btnTermClear.BackColor = this.ColBgSidebar;
+                this.btnTermClear.ForeColor = this.ColTextPrimary;
+                this.btnTermClear.FlatAppearance.BorderColor = this.ColBorder;
+            }
+            if (this.btnTermRestart != null)
+            {
+                this.btnTermRestart.BackColor = this.ColBgSidebar;
+                this.btnTermRestart.ForeColor = Color.FromArgb(56, 189, 248);
+                this.btnTermRestart.FlatAppearance.BorderColor = Color.FromArgb(56, 189, 248);
+            }
+            if (this.btnTermBackToChat != null)
+            {
+                this.btnTermBackToChat.BackColor = this.ColAccent;
+                this.btnTermBackToChat.ForeColor = Color.White;
+                this.btnTermBackToChat.FlatAppearance.BorderColor = this.ColAccent;
+            }
+
             this.serverExtModuleBar.BackColor = this.ColBgSidebar;
             this.rtbChat.BackColor = this.ColBgChat;
             this.rtbChat.ForeColor = this.ColTextPrimary;
             this.rtbChat.Font = this.ChatFont;
 
+            if (this.rtbTerminal != null)
+            {
+                float termSize = Math.Max(9.5f, Math.Min(14f, this.CurrentFontSize));
+                try { this.rtbTerminal.Font = new Font("Consolas", termSize); } catch { }
+            }
+
             this.inputBottomPanel.BackColor = this.ColBgToolbar;
             this.txtInput.BackColor = this.ColBgInput;
             this.txtInput.ForeColor = this.ColTextPrimary;
+            try
+            {
+                FontStyle inputStyle = (this.CurrentFontWeightMode == "bold") ? FontStyle.Bold : FontStyle.Regular;
+                float inputSize = Math.Max(9f, Math.Min(14f, this.CurrentFontSize));
+                this.txtInput.Font = new Font(this.CurrentFontName, inputSize, inputStyle);
+            }
+            catch { }
             this.btnSend.BackColor = this.ColAccent;
             this.btnSend.ForeColor = Color.White;
 
@@ -1141,23 +2020,61 @@ namespace NyaaChatNative
             this.lblRightUsersTitle.ForeColor = this.ColTextPrimary;
             this.lstOnlineUsers.BackColor = this.ColBgSidebar;
             this.lstOnlineUsers.ForeColor = this.ColTextPrimary;
+
+            ToolStripProfessionalRenderer menuRenderer = new ToolStripProfessionalRenderer(
+                new ThemedMenuColorTable(this.ColBgSidebar, this.ColBorder, this.ColAccent));
+            ContextMenuStrip[] menus = new ContextMenuStrip[]
+            {
+                this.treeServersChannels != null ? this.treeServersChannels.ContextMenuStrip : null,
+                this.lstOnlineUsers != null ? this.lstOnlineUsers.ContextMenuStrip : null,
+                this.trayMenu
+            };
+            foreach (ContextMenuStrip cms in menus)
+            {
+                if (cms == null) continue;
+                cms.Renderer = menuRenderer;
+                cms.BackColor = this.ColBgSidebar;
+                cms.ForeColor = this.ColTextPrimary;
+                foreach (ToolStripItem item in cms.Items)
+                {
+                    item.ForeColor = this.ColTextPrimary;
+                    item.BackColor = this.ColBgSidebar;
+                }
+            }
+
+            ApplyControlScrollbarAndComboTheme(this);
+        }
+
+        private void LayoutChannelHeaderButtons()
+        {
+            if (this.channelHeaderBar == null) return;
+            if (this.IsTerminalViewActive && this.btnTermBackToChat != null)
+            {
+                this.btnTermBackToChat.Left = this.channelHeaderBar.Width - this.btnTermBackToChat.Width - 10;
+                this.btnTermRestart.Left = this.btnTermBackToChat.Left - this.btnTermRestart.Width - 6;
+                this.btnTermClear.Left = this.btnTermRestart.Left - this.btnTermClear.Width - 6;
+                this.lblChannelSubTopic.Width = Math.Max(120, this.btnTermClear.Left - this.lblChannelSubTopic.Left - 10);
+            }
+            else if (this.btnReport112 != null && this.btnChannelTopicEdit != null)
+            {
+                this.btnReport112.Left = this.channelHeaderBar.Width - this.btnReport112.Width - 10;
+                this.btnChannelTopicEdit.Left = this.btnReport112.Left - this.btnChannelTopicEdit.Width - 6;
+                this.lblChannelSubTopic.Width = Math.Max(120, this.btnChannelTopicEdit.Left - this.lblChannelSubTopic.Left - 10);
+            }
         }
 
         private void OnMainFormLoad(object sender, EventArgs e)
         {
             try { RegisterHotKey(this.Handle, HOTKEY_ID_BOSS, MOD_ALT, VK_Q); } catch { }
 
+            ApplyWindowTitleBarTheme(this);
+            ApplyDefaultSplitters();
+
             int opacity = ParseInt(GetIni("Window", "Opacity", "100"), 100);
             ApplyHardwareSafeOpacity(opacity);
 
-            // Position right header buttons cleanly
-            this.channelHeaderBar.Resize += delegate
-            {
-                this.btnReport112.Left = this.channelHeaderBar.Width - this.btnReport112.Width - 10;
-                this.btnChannelTopicEdit.Left = this.btnReport112.Left - this.btnChannelTopicEdit.Width - 6;
-            };
-            this.btnReport112.Left = this.channelHeaderBar.Width - this.btnReport112.Width - 10;
-            this.btnChannelTopicEdit.Left = this.btnReport112.Left - this.btnChannelTopicEdit.Width - 6;
+            this.channelHeaderBar.Resize += delegate { LayoutChannelHeaderButtons(); };
+            LayoutChannelHeaderButtons();
 
             // Prompt login if no nickname set or show quick login dialog
             ShowInitialLoginDialog();
@@ -1172,13 +2089,42 @@ namespace NyaaChatNative
 
             if (autoConnect && !string.IsNullOrEmpty(savedNick))
             {
-                ConnectOrSwitchToServer(defaultServer, defaultChan, "");
-                return;
+                string autoServers = GetIni("Server", "AutoConnectServers", "");
+                if (string.IsNullOrEmpty(autoServers)) autoServers = GetIni("Server", "ExtraServers", "");
+                if (string.IsNullOrEmpty(autoServers)) autoServers = defaultServer;
+
+                string[] srvList = autoServers.Split(new char[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries);
+                bool anyConnected = false;
+                for (int i = 0; i < srvList.Length; i++)
+                {
+                    string srv = srvList[i].Trim();
+                    if (string.IsNullOrEmpty(srv)) continue;
+
+                    string ch = defaultChan;
+                    string key = "";
+                    int hashIdx = srv.IndexOf('#');
+                    if (hashIdx >= 0)
+                    {
+                        ch = srv.Substring(hashIdx).Trim();
+                        srv = srv.Substring(0, hashIdx).Trim();
+                    }
+
+                    List<string> ajChans = GetAutoJoinChannelsForServer(srv, ExtractHost(srv));
+                    if (ajChans != null && ajChans.Count > 0)
+                    {
+                        ch = ajChans[0];
+                    }
+
+                    ConnectOrSwitchToServer(srv, ch, key);
+                    anyConnected = true;
+                }
+
+                if (anyConnected) return;
             }
 
             using (Form dlg = new Form())
             {
-                dlg.Text = "Nyaa Chat - 접속 설정";
+                dlg.Text = Tr("Nyaa Chat - 접속 설정", "Nyaa Chat - Connection Setup");
                 dlg.Size = new Size(440, 340);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
@@ -1186,17 +2132,18 @@ namespace NyaaChatNative
                 dlg.MinimizeBox = false;
                 dlg.BackColor = this.ColBgWindow;
                 dlg.ForeColor = this.ColTextPrimary;
+                ApplyWindowTitleBarTheme(dlg);
 
                 Label lblWelcome = new Label
                 {
-                    Text = "Nyaa Chat 멀티서버 클라이언트 접속 설정",
+                    Text = Tr("Nyaa Chat 멀티서버 클라이언트 접속 설정", "Nyaa Chat Multi-Server Connection Setup"),
                     Location = new Point(20, 18),
                     AutoSize = true,
                     Font = new Font("맑은 고딕", 10f, FontStyle.Bold),
                     ForeColor = this.ColTextPrimary
                 };
 
-                Label lblNick = new Label { Text = "사용할 닉네임 (최대 16자):", Location = new Point(20, 54), AutoSize = true };
+                Label lblNick = new Label { Text = Tr("사용할 닉네임 (최대 16자):", "Nickname (max 16 chars):"), Location = new Point(20, 54), AutoSize = true };
                 TextBox txtNick = new TextBox
                 {
                     Text = savedNick,
@@ -1208,7 +2155,7 @@ namespace NyaaChatNative
                     ForeColor = this.ColTextPrimary
                 };
 
-                Label lblSrv = new Label { Text = "기본 접속 서버 주소:", Location = new Point(20, 114), AutoSize = true };
+                Label lblSrv = new Label { Text = Tr("기본 접속 서버 주소:", "Default Server URL:"), Location = new Point(20, 114), AutoSize = true };
                 TextBox txtSrv = new TextBox
                 {
                     Text = defaultServer,
@@ -1219,7 +2166,7 @@ namespace NyaaChatNative
                     ForeColor = this.ColTextPrimary
                 };
 
-                Label lblCh = new Label { Text = "시작 채널:", Location = new Point(280, 114), AutoSize = true };
+                Label lblCh = new Label { Text = Tr("시작 채널:", "Initial Channel:"), Location = new Point(280, 114), AutoSize = true };
                 TextBox txtCh = new TextBox
                 {
                     Text = defaultChan,
@@ -1232,7 +2179,7 @@ namespace NyaaChatNative
 
                 CheckBox chkTerms = new CheckBox
                 {
-                    Text = "[필수] 이용약관, 개인정보 처리방침 동의 및 만 14세 이상 확인",
+                    Text = Tr("[필수] 이용약관, 개인정보 처리방침 동의 및 만 14세 이상 확인", "[Required] Agree to Terms & Privacy Policy (Age 14+)"),
                     Checked = GetIni("User", "AgreeTerms", "true").ToLower() == "true",
                     Location = new Point(20, 178),
                     AutoSize = true,
@@ -1241,7 +2188,7 @@ namespace NyaaChatNative
 
                 CheckBox chkAuto = new CheckBox
                 {
-                    Text = "다음 실행 시 이 설정으로 바로 입장 (AutoConnect)",
+                    Text = Tr("다음 실행 시 이 설정으로 바로 입장 (AutoConnect)", "Auto-connect with these settings on startup"),
                     Checked = autoConnect,
                     Location = new Point(20, 206),
                     AutoSize = true,
@@ -1250,7 +2197,7 @@ namespace NyaaChatNative
 
                 Button btnStart = new Button
                 {
-                    Text = "채팅방 입장하기",
+                    Text = Tr("채팅방 입장하기", "Connect & Join"),
                     Location = new Point(20, 244),
                     Size = new Size(380, 38),
                     FlatStyle = FlatStyle.Flat,
@@ -1266,13 +2213,13 @@ namespace NyaaChatNative
                     string nick = txtNick.Text.Trim();
                     if (string.IsNullOrEmpty(nick))
                     {
-                        MessageBox.Show("사용할 닉네임을 입력해 주세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        MessageBox.Show(Tr("사용할 닉네임을 입력해 주세요.", "Please enter a nickname."), Tr("알림", "Notice"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         txtNick.Focus();
                         return;
                     }
                     if (!chkTerms.Checked)
                     {
-                        MessageBox.Show("필수 약관 및 만 14세 이상 확인에 체크해 주세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        MessageBox.Show(Tr("필수 약관 및 만 14세 이상 확인에 체크해 주세요.", "Please check the required agreement box."), Tr("알림", "Notice"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         return;
                     }
 
@@ -1303,7 +2250,23 @@ namespace NyaaChatNative
                             string clean = s.Trim();
                             if (!string.IsNullOrEmpty(clean))
                             {
-                                ConnectOrSwitchToServer(clean, "#자유대화", "");
+                                string chToJoin = "";
+                                int hashIdx = clean.IndexOf('#');
+                                if (hashIdx >= 0)
+                                {
+                                    chToJoin = clean.Substring(hashIdx).Trim();
+                                    clean = clean.Substring(0, hashIdx).Trim();
+                                }
+                                List<string> ajChans = GetAutoJoinChannelsForServer(clean, ExtractHost(clean));
+                                if (string.IsNullOrEmpty(chToJoin) && ajChans != null && ajChans.Count > 0)
+                                {
+                                    chToJoin = ajChans[0];
+                                }
+                                if (string.IsNullOrEmpty(chToJoin))
+                                {
+                                    chToJoin = defaultChan;
+                                }
+                                ConnectOrSwitchToServer(clean, chToJoin, "");
                             }
                         }
                     }
@@ -1320,6 +2283,18 @@ namespace NyaaChatNative
             string normUrl = NormalizeUrl(serverUrl);
             if (string.IsNullOrEmpty(normUrl)) return;
 
+            if (string.IsNullOrEmpty(targetChannel))
+            {
+                List<string> ajChans = GetAutoJoinChannelsForServer(normUrl, ExtractHost(normUrl));
+                if (ajChans != null && ajChans.Count > 0)
+                {
+                    targetChannel = ajChans[0];
+                }
+                else
+                {
+                    targetChannel = GetIni("Server", "DefaultChannel", "#자유대화");
+                }
+            }
             if (string.IsNullOrEmpty(targetChannel)) targetChannel = "#자유대화";
             if (!targetChannel.StartsWith("#") && !targetChannel.StartsWith("＃"))
             {
@@ -1328,7 +2303,7 @@ namespace NyaaChatNative
 
             if (string.IsNullOrEmpty(this.GlobalNickname))
             {
-                this.GlobalNickname = "유저_" + new Random().Next(100, 999);
+                this.GlobalNickname = Tr("유저_", "User_") + new Random().Next(100, 999);
             }
 
             NyaaServerSession session;
@@ -1375,10 +2350,17 @@ namespace NyaaChatNative
             this.ActiveSession = session;
             this.ActiveRoomId = targetChannel;
 
-            AppendSystemMessageToSession(session, targetChannel, string.Format("* [{0}] 서버에 연결 중입니다... (채널: {1})", session.Host, targetChannel));
+            AppendSystemMessageToSession(session, targetChannel, string.Format(
+                Tr("* [{0}] 서버에 연결 중입니다... (채널: {1})", "* Connecting to [{0}]... (Channel: {1})"),
+                session.Host, targetChannel
+            ));
             if (normUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
             {
-                AppendSystemMessageToSession(session, targetChannel, string.Format("* [보안 안내] 현재 서버({0})는 TLS 암호화가 없는 일반 연결(ws://)입니다. 중요한 비밀번호 입력에 주의하세요.", session.Host));
+                AppendSystemMessageToSession(session, targetChannel, string.Format(
+                    Tr("* [보안 안내] 현재 서버({0})는 TLS 암호화가 없는 일반 연결(ws://)입니다. 중요한 비밀번호 입력에 주의하세요.",
+                       "* [Security Notice] Server ({0}) uses unencrypted ws:// instead of wss://. Avoid entering sensitive passwords."),
+                    session.Host
+                ));
             }
             RefreshLeftServerTree();
             SwitchActiveView(session, targetChannel);
@@ -1400,12 +2382,16 @@ namespace NyaaChatNative
 
         public void OnSessionConnectionError(NyaaServerSession session, string errMsg)
         {
-            AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format("* [연결 오류] [{0}] 서버: {1}", session.Host, errMsg));
+            AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format(
+                Tr("* [연결 오류] [{0}] 서버: {1}", "* [Connection Error] [{0}]: {1}"),
+                session.Host, errMsg
+            ));
             UpdateConnectionBadge();
         }
 
         private void UpdateConnectionBadge()
         {
+            if (this.lblConnBadge == null) return;
             int connectedCount = 0;
             foreach (NyaaServerSession s in this.Sessions.Values)
             {
@@ -1413,11 +2399,11 @@ namespace NyaaChatNative
             }
             if (connectedCount > 0)
             {
-                this.lblConnBadge.Text = string.Format("● {0}개 서버 동시접속중", connectedCount);
+                this.lblConnBadge.Text = string.Format(Tr("● {0}개 서버 동시접속중", "● {0} Server(s) Online"), connectedCount);
             }
             else
             {
-                this.lblConnBadge.Text = "○ 서버 연결 대기중";
+                this.lblConnBadge.Text = Tr("○ 서버 연결 대기중", "○ Disconnected");
             }
         }
 
@@ -1462,6 +2448,13 @@ namespace NyaaChatNative
                 {
                     session.HasAnnouncedExtensions = true;
                     AnnounceServerExtensionsIfAny(session, initialRoom);
+                }
+
+                // Trigger Auto-Join channels for this server
+                if (!session.HasAutoJoined)
+                {
+                    session.HasAutoJoined = true;
+                    TriggerAutoJoinForSession(session, initialRoom);
                 }
 
                 RefreshLeftServerTree();
@@ -1666,6 +2659,99 @@ namespace NyaaChatNative
             }
         }
 
+        public List<string> GetAutoJoinChannelsForServer(string serverUrl, string host)
+        {
+            List<string> list = new List<string>();
+            if (this.IniData == null || !this.IniData.ContainsKey("AutoJoin")) return list;
+
+            Dictionary<string, string> ajSec = this.IniData["AutoJoin"];
+            string rawChannels = null;
+
+            if (!string.IsNullOrEmpty(host) && ajSec.ContainsKey(host))
+            {
+                rawChannels = ajSec[host];
+            }
+            else if (!string.IsNullOrEmpty(serverUrl))
+            {
+                string norm = NormalizeUrl(serverUrl);
+                string extracted = ExtractHost(norm);
+                if (!string.IsNullOrEmpty(extracted) && ajSec.ContainsKey(extracted))
+                {
+                    rawChannels = ajSec[extracted];
+                }
+                else if (ajSec.ContainsKey(norm))
+                {
+                    rawChannels = ajSec[norm];
+                }
+            }
+
+            if (!string.IsNullOrEmpty(rawChannels))
+            {
+                string[] parts = rawChannels.Split(new char[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    string ch = parts[i].Trim();
+                    if (string.IsNullOrEmpty(ch)) continue;
+                    if (!ch.StartsWith("#") && !ch.StartsWith("＃")) ch = "#" + ch;
+                    bool exists = false;
+                    for (int j = 0; j < list.Count; j++)
+                    {
+                        if (string.Equals(list[j], ch, StringComparison.OrdinalIgnoreCase)) { exists = true; break; }
+                    }
+                    if (!exists) list.Add(ch);
+                }
+            }
+            return list;
+        }
+
+        public void TriggerAutoJoinForSession(NyaaServerSession session, string currentRoom)
+        {
+            if (session == null || !session.IsConnected) return;
+            List<string> autoChannels = GetAutoJoinChannelsForServer(session.ServerUrl, session.Host);
+            if (autoChannels == null || autoChannels.Count == 0) return;
+
+            List<string> toJoin = new List<string>();
+            for (int i = 0; i < autoChannels.Count; i++)
+            {
+                string ch = autoChannels[i];
+                if (string.IsNullOrEmpty(ch)) continue;
+                if (!string.Equals(ch, currentRoom, StringComparison.OrdinalIgnoreCase) &&
+                    !session.Channels.ContainsKey(ch))
+                {
+                    toJoin.Add(ch);
+                }
+            }
+
+            if (toJoin.Count == 0) return;
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                // Throttled join queue:
+                // Server rate limit: max 5 channel joins per 2 seconds.
+                // Client paces by sending 1 channel every 450ms, and pauses 2000ms after every 4 channels.
+                // In any 2-second window, at most 4 channel joins are sent.
+                for (int i = 0; i < toJoin.Count; i++)
+                {
+                    if (session == null || !session.IsConnected) break;
+                    string ch = toJoin[i];
+                    session.Emit("join_channel", new Dictionary<string, object>
+                    {
+                        { "channelName", ch },
+                        { "key", "" }
+                    });
+
+                    if ((i + 1) % 4 == 0)
+                    {
+                        Thread.Sleep(2000);
+                    }
+                    else
+                    {
+                        Thread.Sleep(450);
+                    }
+                }
+            });
+        }
+
         private void ApplyRoomMetaToChannelInfo(ChannelItemInfo ch, Dictionary<string, object> d)
         {
             if (ch == null || d == null) return;
@@ -1811,7 +2897,8 @@ namespace NyaaChatNative
 
             if (isMention)
             {
-                if (!this.Focused) FlashWindow(this.Handle, true);
+                FlashMainWindow();
+                ShowTrayNotification(string.Format(Tr("[{0}] {1}님의 멘션", "[{0}] Mention from {1}"), roomId, senderNick), content);
                 PlayConfiguredSound("mention");
             }
             else if (isJoinLeave)
@@ -1841,7 +2928,16 @@ namespace NyaaChatNative
         private void CheckOnTextScriptRules(NyaaServerSession session, string roomId, string senderNick, string content)
         {
             long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            foreach (string[] rule in this.OnTextRules)
+            List<string[]> combinedRules = new List<string[]>(this.OnTextRules);
+            foreach (ClientModuleDef mod in GetActiveModulesForSession(session))
+            {
+                if (mod.Triggers != null && mod.Triggers.Count > 0)
+                {
+                    combinedRules.AddRange(mod.Triggers);
+                }
+            }
+
+            foreach (string[] rule in combinedRules)
             {
                 string keyword = rule[0];
                 string action = rule[1];
@@ -1919,11 +3015,14 @@ namespace NyaaChatNative
         {
             this.treeServersChannels.BeginUpdate();
             this.treeServersChannels.Nodes.Clear();
+            TreeNode nodeToSelect = null;
 
             foreach (NyaaServerSession s in this.Sessions.Values)
             {
                 string connIcon = s.IsConnected ? "●" : "○";
-                string srvLabel = string.Format("{0} {1} ({2})", connIcon, s.ServerName, s.Host);
+                string srvLabel = (string.IsNullOrEmpty(s.ServerName) || s.ServerName.Contains("(") || string.Equals(s.ServerName, s.Host, StringComparison.OrdinalIgnoreCase))
+                    ? string.Format("{0} {1}", connIcon, string.IsNullOrEmpty(s.ServerName) ? s.Host : s.ServerName)
+                    : string.Format("{0} {1} ({2})", connIcon, s.ServerName, s.Host);
                 TreeNode srvNode = new TreeNode(srvLabel)
                 {
                     Tag = new object[] { "server", s }
@@ -1936,6 +3035,10 @@ namespace NyaaChatNative
                     {
                         Tag = new object[] { "channel", s, s.InitialTargetChannel }
                     };
+                    if (!this.IsTerminalViewActive && this.ActiveSession == s)
+                    {
+                        nodeToSelect = chNode;
+                    }
                     srvNode.Nodes.Add(chNode);
                 }
                 else
@@ -1944,14 +3047,15 @@ namespace NyaaChatNative
                     {
                         int unread = s.UnreadCounts.ContainsKey(ch.Id) ? s.UnreadCounts[ch.Id] : 0;
                         string unreadTag = unread > 0 ? string.Format(" [{0}]", unread) : "";
-                        string chLabel = string.Format("{0} ({1}명){2}", ch.Name, ch.UserCount, unreadTag);
+                        string chLabel = string.Format(Tr("{0} ({1}명){2}", "{0} ({1}){2}"), ch.Name, ch.UserCount, unreadTag);
                         TreeNode chNode = new TreeNode(chLabel)
                         {
                             Tag = new object[] { "channel", s, ch.Id }
                         };
-                        if (this.ActiveSession == s && string.Equals(this.ActiveRoomId, ch.Id, StringComparison.OrdinalIgnoreCase))
+                        if (!this.IsTerminalViewActive && this.ActiveSession == s && string.Equals(this.ActiveRoomId, ch.Id, StringComparison.OrdinalIgnoreCase))
                         {
                             chNode.NodeFont = this.ChatBoldFont;
+                            nodeToSelect = chNode;
                         }
                         srvNode.Nodes.Add(chNode);
                     }
@@ -1959,6 +3063,15 @@ namespace NyaaChatNative
 
                 srvNode.ExpandAll();
                 this.treeServersChannels.Nodes.Add(srvNode);
+            }
+
+            if (this.IsTerminalViewActive)
+            {
+                this.treeServersChannels.SelectedNode = null;
+            }
+            else if (nodeToSelect != null)
+            {
+                this.treeServersChannels.SelectedNode = nodeToSelect;
             }
 
             this.treeServersChannels.EndUpdate();
@@ -1972,6 +3085,22 @@ namespace NyaaChatNative
             string kind = Convert.ToString(tag[0]);
             NyaaServerSession s = tag[1] as NyaaServerSession;
             if (s == null) return;
+
+            if (e.Button == MouseButtons.Middle)
+            {
+                if (kind == "channel" && tag.Length >= 3)
+                {
+                    string roomId = Convert.ToString(tag[2]);
+                    LeaveChannel(s, roomId);
+                    return;
+                }
+            }
+
+            if (e.Button == MouseButtons.Right)
+            {
+                this.treeServersChannels.SelectedNode = e.Node;
+                return;
+            }
 
             if (kind == "channel" && tag.Length >= 3)
             {
@@ -2010,20 +3139,846 @@ namespace NyaaChatNative
 
         public void SwitchActiveView(NyaaServerSession session, string roomId)
         {
-            if (session == null) return;
-            this.ActiveSession = session;
-            this.ActiveRoomId = string.IsNullOrEmpty(roomId) ? "#자유대화" : roomId;
-            session.UnreadCounts[this.ActiveRoomId] = 0;
+            this.IsTerminalViewActive = false;
+            if (this.rtbTerminal != null) this.rtbTerminal.Visible = false;
+            if (this.rtbChat != null)
+            {
+                this.rtbChat.Visible = true;
+                this.rtbChat.BringToFront();
+            }
+            if (this.btnSend != null) this.btnSend.Text = Tr("전송", "Send");
+
+            if (session != null)
+            {
+                this.ActiveSession = session;
+                this.ActiveRoomId = string.IsNullOrEmpty(roomId) ? "#자유대화" : roomId;
+                session.UnreadCounts[this.ActiveRoomId] = 0;
+            }
 
             UpdateHeaderAndModuleBar();
             RedrawActiveChatHistory();
             RefreshRightUsersList();
             RefreshLeftServerTree();
+            RefreshLeftTerminalModulesPanel();
             this.txtInput.Focus();
+        }
+
+        public void LeaveChannel(NyaaServerSession session, string roomId)
+        {
+            if (session == null || string.IsNullOrEmpty(roomId)) return;
+
+            if (session.Channels.ContainsKey(roomId))
+            {
+                session.Channels.Remove(roomId);
+            }
+            if (session.UnreadCounts.ContainsKey(roomId))
+            {
+                session.UnreadCounts.Remove(roomId);
+            }
+
+            if (session.IsConnected)
+            {
+                session.Emit("part_channel", new Dictionary<string, object>
+                {
+                    { "channelId", roomId }
+                });
+            }
+
+            AppendSystemMessageToSession(session, roomId, string.Format(Tr("* 채널 [{0}]에서 퇴장했습니다.", "* Left channel [{0}]."), roomId));
+
+            // If this was the active channel in active view, switch to another channel
+            if (this.ActiveSession == session && string.Equals(this.ActiveRoomId, roomId, StringComparison.OrdinalIgnoreCase))
+            {
+                string nextRoom = null;
+                foreach (string ch in session.Channels.Keys)
+                {
+                    nextRoom = ch;
+                    break;
+                }
+                if (string.IsNullOrEmpty(nextRoom))
+                {
+                    nextRoom = session.InitialTargetChannel;
+                    if (string.IsNullOrEmpty(nextRoom)) nextRoom = "#자유대화";
+                }
+                SwitchActiveView(session, nextRoom);
+                if (session.IsConnected)
+                {
+                    session.Emit("switch_room", new Dictionary<string, object>
+                    {
+                        { "targetType", "channel" },
+                        { "targetId", nextRoom }
+                    });
+                }
+            }
+            else
+            {
+                RefreshLeftServerTree();
+            }
+        }
+
+        private void OnTreeContextMenuOpening(object sender, CancelEventArgs e)
+        {
+            Point clientPoint = this.treeServersChannels.PointToClient(Cursor.Position);
+            TreeNode node = this.treeServersChannels.GetNodeAt(clientPoint);
+            if (node != null)
+            {
+                this.treeServersChannels.SelectedNode = node;
+            }
+            else
+            {
+                node = this.treeServersChannels.SelectedNode;
+            }
+
+            ContextMenuStrip menu = this.treeServersChannels.ContextMenuStrip;
+            if (menu == null) return;
+            menu.Items.Clear();
+
+            object[] tag = (node != null) ? node.Tag as object[] : null;
+            string kind = (tag != null && tag.Length >= 2) ? Convert.ToString(tag[0]) : "";
+            NyaaServerSession s = (tag != null && tag.Length >= 2) ? tag[1] as NyaaServerSession : null;
+
+            if (kind == "channel" && tag.Length >= 3 && s != null)
+            {
+                string roomId = Convert.ToString(tag[2]);
+                menu.Items.Add(string.Format(Tr("[{0}] 채널 닫기 및 퇴장 (/part)", "[{0}] Close & Leave Channel (/part)"), roomId), null, delegate {
+                    LeaveChannel(s, roomId);
+                });
+                menu.Items.Add(string.Format(Tr("[{0}] 토픽 및 모드 설정 (/topic · /mode)", "[{0}] Topic & Mode (/topic · /mode)"), roomId), null, delegate {
+                    SwitchActiveView(s, roomId);
+                    PromptEditChannelTopic();
+                });
+                menu.Items.Add(new ToolStripSeparator());
+                menu.Items.Add(Tr("채널명 복사", "Copy Channel Name"), null, delegate {
+                    try { Clipboard.SetText(roomId); } catch { }
+                });
+                menu.Items.Add(Tr("새 채널 개설 / 입장 (/join)...", "Join / Create Channel (/join)..."), null, delegate {
+                    SwitchActiveView(s, roomId);
+                    PromptJoinChannelOnActiveServer();
+                });
+                menu.Items.Add(Tr("네트워크 서버 & 채널 리스트 (F2)", "Network Server & Channel List (F2)"), null, delegate {
+                    OpenServerListExplorer();
+                });
+            }
+            else if (kind == "server" && s != null)
+            {
+                string srvName = s.ServerName;
+                if (s.IsConnected)
+                {
+                    menu.Items.Add(string.Format(Tr("[{0}] 서버 접속 해제", "[{0}] Disconnect Server"), srvName), null, delegate {
+                        s.Disconnect();
+                        RefreshLeftServerTree();
+                    });
+                }
+                else
+                {
+                    menu.Items.Add(string.Format(Tr("[{0}] 서버 다시 연결", "[{0}] Reconnect Server"), srvName), null, delegate {
+                        s.ConnectAsync();
+                        RefreshLeftServerTree();
+                    });
+                }
+                menu.Items.Add(Tr("새 채널 개설 / 입장 (/join)...", "Join / Create Channel (/join)..."), null, delegate {
+                    this.ActiveSession = s;
+                    PromptJoinChannelOnActiveServer();
+                });
+                menu.Items.Add(new ToolStripSeparator());
+                menu.Items.Add(Tr("서버 주소 복사", "Copy Server URL"), null, delegate {
+                    try { Clipboard.SetText(s.ServerUrl); } catch { }
+                });
+                menu.Items.Add(Tr("네트워크 서버 & 채널 리스트 (F2)", "Network Server & Channel List (F2)"), null, delegate {
+                    OpenServerListExplorer();
+                });
+            }
+            else
+            {
+                menu.Items.Add(Tr("새 채널 개설 / 입장 (/join)...", "Join / Create Channel (/join)..."), null, delegate {
+                    PromptJoinChannelOnActiveServer();
+                });
+                menu.Items.Add(Tr("네트워크 서버 & 채널 리스트 (F2)", "Network Server & Channel List (F2)"), null, delegate {
+                    OpenServerListExplorer();
+                });
+            }
+        }
+
+        private void FlashMainWindow()
+        {
+            try
+            {
+                if (Form.ActiveForm == this && this.ContainsFocus) return;
+                FLASHWINFO fi = new FLASHWINFO();
+                fi.cbSize = (uint)Marshal.SizeOf(fi);
+                fi.hwnd = this.Handle;
+                fi.dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG;
+                fi.uCount = uint.MaxValue;
+                fi.dwTimeout = 0;
+                FlashWindowEx(ref fi);
+            }
+            catch { }
+        }
+
+        private void StopFlashingMainWindow()
+        {
+            try
+            {
+                FLASHWINFO fi = new FLASHWINFO();
+                fi.cbSize = (uint)Marshal.SizeOf(fi);
+                fi.hwnd = this.Handle;
+                fi.dwFlags = FLASHW_STOP;
+                fi.uCount = 0;
+                fi.dwTimeout = 0;
+                FlashWindowEx(ref fi);
+            }
+            catch { }
+        }
+
+        private void ShowTrayNotification(string title, string text)
+        {
+            try
+            {
+                if (Form.ActiveForm == this && this.ContainsFocus) return;
+                if (this.trayIcon != null && this.trayIcon.Visible)
+                {
+                    string shortText = (text ?? "").Length > 120 ? (text.Substring(0, 117) + "...") : (text ?? "");
+                    this.trayIcon.ShowBalloonTip(3000, title ?? "NyaaChat", shortText, ToolTipIcon.Info);
+                }
+            }
+            catch { }
+        }
+
+        private void HandleTabCompletion(bool reverse)
+        {
+            if (this.isTabCycling && this.tabCandidates.Count > 0)
+            {
+                if (reverse)
+                {
+                    this.tabCandidateIndex = (this.tabCandidateIndex - 1 + this.tabCandidates.Count) % this.tabCandidates.Count;
+                }
+                else
+                {
+                    this.tabCandidateIndex = (this.tabCandidateIndex + 1) % this.tabCandidates.Count;
+                }
+                ApplyTabCandidate(this.tabCandidates[this.tabCandidateIndex]);
+                return;
+            }
+
+            int caret = this.txtInput.SelectionStart;
+            string text = this.txtInput.Text ?? "";
+            string left = text.Substring(0, Math.Min(caret, text.Length));
+            int lastSpace = left.LastIndexOfAny(new char[] { ' ', '\t' });
+            this.tabWordStartIndex = (lastSpace < 0) ? 0 : lastSpace + 1;
+            this.tabOriginalPrefix = left.Substring(this.tabWordStartIndex);
+
+            if (string.IsNullOrEmpty(this.tabOriginalPrefix)) return;
+
+            List<string> matches = new List<string>();
+
+            // Case 1: Slash command completion
+            if (this.tabWordStartIndex == 0 && this.tabOriginalPrefix.StartsWith("/"))
+            {
+                string[] baseCmds = new string[]
+                {
+                    "/join", "/part", "/nick", "/whois", "/topic", "/mode",
+                    "/invite", "/kick", "/op", "/deop", "/me", "/notice",
+                    "/clear", "/servers", "/list", "/server", "/export",
+                    "/help", "/settings", "/modules", "/theme", "/powershell",
+                    "/terminal", "/query", "/msg", "/away", "/back", "/chat",
+                    "/cls", "/restart", "/raw", "/ping", "/112", "/report"
+                };
+
+                foreach (string c in baseCmds)
+                {
+                    if (c.StartsWith(this.tabOriginalPrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!matches.Contains(c)) matches.Add(c);
+                    }
+                }
+
+                if (this.AliasesMap != null)
+                {
+                    foreach (string a in this.AliasesMap.Keys)
+                    {
+                        string ca = "/" + a;
+                        if (ca.StartsWith(this.tabOriginalPrefix, StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!matches.Contains(ca)) matches.Add(ca);
+                        }
+                    }
+                }
+
+                if (this.CustomCommandRules != null)
+                {
+                    foreach (string c in this.CustomCommandRules.Keys)
+                    {
+                        string cc = "/" + c;
+                        if (cc.StartsWith(this.tabOriginalPrefix, StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!matches.Contains(cc)) matches.Add(cc);
+                        }
+                    }
+                }
+
+                if (this.ActiveSession != null && this.ActiveSession.ServerExtendedCommands != null)
+                {
+                    foreach (ServerExtCommand ec in this.ActiveSession.ServerExtendedCommands)
+                    {
+                        string ecCmd = "/" + ec.Cmd;
+                        if (ecCmd.StartsWith(this.tabOriginalPrefix, StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!matches.Contains(ecCmd)) matches.Add(ecCmd);
+                        }
+                    }
+                }
+
+                for (int i = 0; i < matches.Count; i++)
+                {
+                    matches[i] = matches[i] + " ";
+                }
+            }
+            else
+            {
+                // Case 2: Nickname completion
+                bool hasAt = this.tabOriginalPrefix.StartsWith("@");
+                string searchPrefix = hasAt ? this.tabOriginalPrefix.Substring(1) : this.tabOriginalPrefix;
+
+                if (!string.IsNullOrEmpty(searchPrefix) && this.ActiveSession != null)
+                {
+                    ChannelItemInfo activeCh = null;
+                    this.ActiveSession.Channels.TryGetValue(this.ActiveRoomId, out activeCh);
+
+                    List<string> roomNicks = new List<string>();
+                    List<string> otherNicks = new List<string>();
+
+                    foreach (OnlineUserInfo u in this.ActiveSession.OnlineUsers)
+                    {
+                        if (string.IsNullOrEmpty(u.Nickname)) continue;
+
+                        bool inRoom = u.JoinedChannels.Count > 0
+                            ? u.JoinedChannels.Contains(this.ActiveRoomId)
+                            : string.Equals(u.CurrentRoom, this.ActiveRoomId, StringComparison.OrdinalIgnoreCase);
+
+                        if (u.IsBot)
+                        {
+                            inRoom = (activeCh != null && activeCh.IsService) || this.ActiveRoomId == "#자유대화";
+                        }
+
+                        if (u.Nickname.StartsWith(searchPrefix, StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (inRoom)
+                            {
+                                if (!roomNicks.Contains(u.Nickname)) roomNicks.Add(u.Nickname);
+                            }
+                            else
+                            {
+                                if (!otherNicks.Contains(u.Nickname)) otherNicks.Add(u.Nickname);
+                            }
+                        }
+                    }
+
+                    List<string> combinedNicks = new List<string>();
+                    combinedNicks.AddRange(roomNicks);
+                    foreach (string n in otherNicks)
+                    {
+                        if (!combinedNicks.Contains(n)) combinedNicks.Add(n);
+                    }
+
+                    foreach (string nick in combinedNicks)
+                    {
+                        string formatted;
+                        if (this.tabWordStartIndex == 0)
+                        {
+                            formatted = (hasAt ? "@" : "") + nick + ": ";
+                        }
+                        else
+                        {
+                            formatted = (hasAt ? "@" : "") + nick + " ";
+                        }
+                        matches.Add(formatted);
+                    }
+                }
+            }
+
+            if (matches.Count == 0) return;
+
+            this.tabCandidates = matches;
+            this.tabCandidateIndex = 0;
+            this.isTabCycling = true;
+            ApplyTabCandidate(this.tabCandidates[0]);
+        }
+
+        private void ApplyTabCandidate(string candidate)
+        {
+            if (string.IsNullOrEmpty(candidate)) return;
+            string text = this.txtInput.Text ?? "";
+            int caret = this.txtInput.SelectionStart;
+            string right = (caret <= text.Length) ? text.Substring(caret) : "";
+            string left = text.Substring(0, Math.Min(this.tabWordStartIndex, text.Length));
+            this.txtInput.Text = left + candidate + right;
+            this.txtInput.SelectionStart = left.Length + candidate.Length;
+        }
+
+        private void ResetTabCompletion()
+        {
+            this.isTabCycling = false;
+            this.tabOriginalPrefix = "";
+            this.tabWordStartIndex = 0;
+            this.tabCandidates.Clear();
+            this.tabCandidateIndex = -1;
+        }
+
+        // ====================================================================
+        // Left Sidebar Bottom Module Dock & Interactive PowerShell Console
+        // ====================================================================
+        public void RefreshLeftTerminalModulesPanel()
+        {
+            if (this.flowLeftModules == null) return;
+
+            this.flowLeftModules.SuspendLayout();
+            this.flowLeftModules.Controls.Clear();
+
+            List<ClientModuleDef> termMods = new List<ClientModuleDef>();
+            foreach (ClientModuleDef m in this.InstalledModules)
+            {
+                if (!m.Enabled) continue;
+                if (string.Equals(m.ModuleType, "Terminal", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(m.Id, "PowerShell", StringComparison.OrdinalIgnoreCase))
+                {
+                    termMods.Add(m);
+                }
+            }
+
+            int btnWidth = Math.Max(140, this.flowLeftModules.ClientSize.Width - 14);
+
+            if (termMods.Count == 0)
+            {
+                Button btnEmpty = new Button
+                {
+                    Text = Tr("+ 파워쉘 / 터미널 모듈 켜기", "+ Enable PowerShell Module"),
+                    Size = new Size(btnWidth, 30),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgHeader,
+                    ForeColor = this.ColTextSecondary,
+                    Font = new Font("맑은 고딕", 8.5f),
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Cursor = Cursors.Hand,
+                    Margin = new Padding(0, 2, 0, 2)
+                };
+                btnEmpty.FlatAppearance.BorderColor = this.ColBorder;
+                btnEmpty.Click += delegate { OpenModulesManagerDialog(); };
+                this.flowLeftModules.Controls.Add(btnEmpty);
+            }
+            else
+            {
+                foreach (ClientModuleDef mod in termMods)
+                {
+                    ClientModuleDef capturedMod = mod;
+                    bool isActive = this.IsTerminalViewActive && (this.ActiveTerminalModule == capturedMod || (this.ActiveTerminalModule != null && string.Equals(this.ActiveTerminalModule.FileName, capturedMod.FileName, StringComparison.OrdinalIgnoreCase)));
+                    bool isRunning = (this.psProcess != null && !this.psProcess.HasExited);
+
+                    string statusPrefix = isActive ? "● >_ " : ">_ ";
+                    string runningBadge = isRunning ? Tr(" [세션 켜짐]", " [Running]") : "";
+                    Button bMod = new Button
+                    {
+                        Text = statusPrefix + capturedMod.Name + runningBadge,
+                        Size = new Size(btnWidth, 34),
+                        FlatStyle = FlatStyle.Flat,
+                        BackColor = isActive ? Color.FromArgb(14, 116, 144) : Color.FromArgb(15, 23, 42),
+                        ForeColor = isActive ? Color.White : Color.FromArgb(56, 189, 248),
+                        Font = new Font("맑은 고딕", 9.2f, FontStyle.Bold),
+                        TextAlign = ContentAlignment.MiddleLeft,
+                        Padding = new Padding(6, 0, 4, 0),
+                        Cursor = Cursors.Hand,
+                        Margin = new Padding(0, 2, 0, 3)
+                    };
+                    bMod.FlatAppearance.BorderColor = isActive ? Color.FromArgb(125, 211, 252) : Color.FromArgb(56, 189, 248);
+                    bMod.FlatAppearance.BorderSize = isActive ? 2 : 1;
+                    bMod.Click += delegate
+                    {
+                        SwitchToTerminalModule(capturedMod);
+                    };
+
+                    ContextMenuStrip modMenu = new ContextMenuStrip();
+                    modMenu.Items.Add(Tr("파워쉘 터미널 화면 열기", "Open PowerShell Terminal"), null, delegate { SwitchToTerminalModule(capturedMod); });
+                    modMenu.Items.Add(Tr("PowerShell 세션 재시작 (초기화)", "Restart PowerShell Session"), null, delegate
+                    {
+                        SwitchToTerminalModule(capturedMod);
+                        RestartPowerShellSession();
+                    });
+                    modMenu.Items.Add(new ToolStripSeparator());
+                    modMenu.Items.Add(Tr("현재 채팅방으로 복귀", "Return to Chat Channel"), null, delegate { ExitTerminalViewToChat(); });
+                    modMenu.Items.Add(Tr("모듈 설정 및 코드 편집 (/modules)", "Edit Module in Manager (/modules)"), null, delegate { OpenModulesManagerDialog(); });
+                    bMod.ContextMenuStrip = modMenu;
+
+                    this.flowLeftModules.Controls.Add(bMod);
+                }
+            }
+
+            int desiredHeight = 36 + Math.Max(1, termMods.Count) * 42;
+            this.leftTerminalModulesPanel.Height = Math.Max(82, Math.Min(180, desiredHeight));
+            this.flowLeftModules.ResumeLayout();
+        }
+
+        public void SwitchToTerminalModule(ClientModuleDef mod)
+        {
+            if (mod == null)
+            {
+                foreach (ClientModuleDef m in this.InstalledModules)
+                {
+                    if (string.Equals(m.ModuleType, "Terminal", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(m.Id, "PowerShell", StringComparison.OrdinalIgnoreCase))
+                    {
+                        mod = m;
+                        break;
+                    }
+                }
+            }
+
+            this.ActiveTerminalModule = mod;
+            this.IsTerminalViewActive = true;
+
+            if (this.rtbChat != null) this.rtbChat.Visible = false;
+            if (this.rtbTerminal != null)
+            {
+                this.rtbTerminal.Visible = true;
+                this.rtbTerminal.BringToFront();
+            }
+            if (this.btnSend != null)
+            {
+                this.btnSend.Text = Tr("실행", "Run");
+            }
+
+            EnsurePowerShellSessionRunning();
+            RefreshLeftServerTree();
+            RefreshLeftTerminalModulesPanel();
+            UpdateHeaderAndModuleBar();
+            this.txtInput.Focus();
+        }
+
+        public void ExitTerminalViewToChat()
+        {
+            if (this.ActiveSession != null)
+            {
+                SwitchActiveView(this.ActiveSession, this.ActiveRoomId);
+            }
+            else
+            {
+                this.IsTerminalViewActive = false;
+                if (this.rtbTerminal != null) this.rtbTerminal.Visible = false;
+                if (this.rtbChat != null)
+                {
+                    this.rtbChat.Visible = true;
+                    this.rtbChat.BringToFront();
+                }
+                if (this.btnSend != null) this.btnSend.Text = Tr("전송", "Send");
+                RefreshLeftServerTree();
+                RefreshLeftTerminalModulesPanel();
+                UpdateHeaderAndModuleBar();
+                this.txtInput.Focus();
+            }
+        }
+
+        private void EnsurePowerShellSessionRunning()
+        {
+            if (this.psProcess != null && !this.psProcess.HasExited)
+            {
+                return;
+            }
+
+            StopPowerShellSession();
+
+            try
+            {
+                if (string.IsNullOrEmpty(this.psCurrentWorkDir) || !Directory.Exists(this.psCurrentWorkDir))
+                {
+                    this.psCurrentWorkDir = this.BaseDir;
+                }
+
+                string shellExe = (this.ActiveTerminalModule != null && !string.IsNullOrEmpty(this.ActiveTerminalModule.ShellExe))
+                    ? this.ActiveTerminalModule.ShellExe
+                    : "powershell.exe";
+
+                ProcessStartInfo psi = new ProcessStartInfo
+                {
+                    FileName = shellExe,
+                    Arguments = "-NoLogo -NoProfile -Command -",
+                    WorkingDirectory = this.psCurrentWorkDir,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    StandardOutputEncoding = Encoding.Default,
+                    StandardErrorEncoding = Encoding.Default
+                };
+
+                Process proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
+                proc.OutputDataReceived += delegate (object s, DataReceivedEventArgs e)
+                {
+                    if (e.Data == null) return;
+                    string line = e.Data;
+                    if (line.StartsWith("__NYAA_PWD__"))
+                    {
+                        string newPwd = line.Substring("__NYAA_PWD__".Length).Trim();
+                        if (!string.IsNullOrEmpty(newPwd))
+                        {
+                            this.psCurrentWorkDir = newPwd;
+                            try
+                            {
+                                this.BeginInvoke((MethodInvoker)delegate
+                                {
+                                    if (this.IsTerminalViewActive && this.lblChannelSubTopic != null)
+                                    {
+                                        this.lblChannelSubTopic.Text = string.Format(
+                                            Tr("작업 경로: {0}   (하단 입력창에 PowerShell 명령어 입력 · ↑/↓ 이전 명령어 · 좌측 상단 채널 클릭 시 채팅 복귀)",
+                                               "WorkDir: {0}   (Type PowerShell commands below · Up/Down history · Click channel to return)"),
+                                            this.psCurrentWorkDir);
+                                    }
+                                });
+                            }
+                            catch { }
+                        }
+                        return;
+                    }
+                    AppendTerminalText(line + Environment.NewLine, Color.FromArgb(226, 232, 240));
+                };
+                proc.ErrorDataReceived += delegate (object s, DataReceivedEventArgs e)
+                {
+                    if (e.Data == null) return;
+                    AppendTerminalText(e.Data + Environment.NewLine, Color.FromArgb(248, 113, 113));
+                };
+
+                proc.Start();
+                proc.BeginOutputReadLine();
+                proc.BeginErrorReadLine();
+                this.psProcess = proc;
+
+                if (this.rtbTerminal != null && this.rtbTerminal.TextLength == 0)
+                {
+                    AppendTerminalText("====================================================================\r\n", Color.FromArgb(56, 189, 248));
+                    AppendTerminalText(Tr(
+                        " Windows PowerShell 인터랙티브 모듈 (Nyaa Chat Native)\r\n" +
+                        " - 하단 입력창에 명령어를 입력하면 현재 PowerShell 세션에서 즉시 실행됩니다.\r\n" +
+                        " - cd (경로 이동), $변수, 파이프라인(|) 등 세션 상태가 계속 유지됩니다.\r\n" +
+                        " - 좌측 상단 서버/채널을 클릭하거나 '/chat'을 입력하면 채팅방으로 돌아갑니다.\r\n",
+                        " Windows PowerShell Interactive Module (Nyaa Chat Native)\r\n" +
+                        " - Type any PowerShell command in the bottom input box to run it live.\r\n" +
+                        " - Session state (cd, $variables, functions) persists across commands.\r\n" +
+                        " - Click any server/channel on the left or type '/chat' to return to chat.\r\n"),
+                        Color.FromArgb(125, 211, 252));
+                    AppendTerminalText("====================================================================\r\n", Color.FromArgb(56, 189, 248));
+                }
+
+                // Query initial working directory and PS version
+                SendRawPowerShellBlock("Write-Output (\"PowerShell \" + $PSVersionTable.PSVersion.ToString() + \" Ready (`\"\" + (Get-Location).Path + \"`\")\")\r\nWrite-Output (\"__NYAA_PWD__\" + (Get-Location).Path)");
+                RefreshLeftTerminalModulesPanel();
+            }
+            catch (Exception ex)
+            {
+                AppendTerminalText(Tr("* [PowerShell 시작 오류]: ", "* [PowerShell Start Error]: ") + ex.Message + Environment.NewLine, Color.FromArgb(248, 113, 113));
+            }
+        }
+
+        private void SendRawPowerShellBlock(string psScriptBlock)
+        {
+            if (this.psProcess == null || this.psProcess.HasExited) return;
+            try
+            {
+                string b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(psScriptBlock));
+                string runner = string.Format("Invoke-Expression ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{0}')))", b64);
+                this.psProcess.StandardInput.WriteLine(runner);
+                this.psProcess.StandardInput.Flush();
+            }
+            catch (Exception ex)
+            {
+                AppendTerminalText("* [stdin error]: " + ex.Message + Environment.NewLine, Color.FromArgb(248, 113, 113));
+            }
+        }
+
+        public void RestartPowerShellSession()
+        {
+            StopPowerShellSession();
+            if (this.rtbTerminal != null)
+            {
+                this.rtbTerminal.Clear();
+            }
+            AppendTerminalText(Tr("* [PowerShell] 세션을 새로 시작합니다...\r\n", "* [PowerShell] Restarting session...\r\n"), Color.FromArgb(56, 189, 248));
+            EnsurePowerShellSessionRunning();
+        }
+
+        private void StopPowerShellSession()
+        {
+            if (this.psProcess != null)
+            {
+                try
+                {
+                    if (!this.psProcess.HasExited)
+                    {
+                        this.psProcess.Kill();
+                    }
+                }
+                catch { }
+                try { this.psProcess.Dispose(); } catch { }
+                this.psProcess = null;
+            }
+        }
+
+        public void ExecuteTerminalCommand(string rawCommand)
+        {
+            string cmd = (rawCommand ?? "").Trim();
+            if (string.IsNullOrEmpty(cmd)) return;
+
+            if (this.psCommandHistory.Count == 0 || !string.Equals(this.psCommandHistory[this.psCommandHistory.Count - 1], cmd, StringComparison.Ordinal))
+            {
+                this.psCommandHistory.Add(cmd);
+                if (this.psCommandHistory.Count > 200) this.psCommandHistory.RemoveAt(0);
+            }
+            this.psHistoryIndex = -1;
+
+            if (string.Equals(cmd, "cls", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(cmd, "clear", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(cmd, "Clear-Host", StringComparison.OrdinalIgnoreCase))
+            {
+                if (this.rtbTerminal != null) this.rtbTerminal.Clear();
+                return;
+            }
+
+            if (string.Equals(cmd, "exit", StringComparison.OrdinalIgnoreCase))
+            {
+                ExitTerminalViewToChat();
+                return;
+            }
+
+            EnsurePowerShellSessionRunning();
+
+            AppendTerminalText(string.Format("\r\nPS {0}> ", this.psCurrentWorkDir), Color.FromArgb(56, 189, 248));
+            AppendTerminalText(cmd + "\r\n", Color.FromArgb(250, 204, 21));
+
+            string scriptWithPwd = cmd + "\r\nWrite-Output (\"__NYAA_PWD__\" + (Get-Location).Path)";
+            SendRawPowerShellBlock(scriptWithPwd);
+        }
+
+        private void AppendTerminalText(string text, Color color)
+        {
+            if (this.rtbTerminal == null || this.rtbTerminal.IsDisposed) return;
+            if (this.InvokeRequired)
+            {
+                try
+                {
+                    this.BeginInvoke((MethodInvoker)delegate { AppendTerminalText(text, color); });
+                }
+                catch { }
+                return;
+            }
+
+            try
+            {
+                if (this.rtbTerminal.TextLength > 150000)
+                {
+                    this.rtbTerminal.Clear();
+                }
+                this.rtbTerminal.SelectionStart = this.rtbTerminal.TextLength;
+                this.rtbTerminal.SelectionLength = 0;
+                this.rtbTerminal.SelectionColor = color;
+                this.rtbTerminal.AppendText(text);
+                this.rtbTerminal.SelectionStart = this.rtbTerminal.TextLength;
+                this.rtbTerminal.ScrollToCaret();
+            }
+            catch { }
         }
 
         public void UpdateHeaderAndModuleBar()
         {
+            if (this.btnChannelTopicEdit != null) this.btnChannelTopicEdit.Visible = !this.IsTerminalViewActive;
+            if (this.btnReport112 != null) this.btnReport112.Visible = !this.IsTerminalViewActive;
+            if (this.btnTermClear != null) this.btnTermClear.Visible = this.IsTerminalViewActive;
+            if (this.btnTermRestart != null) this.btnTermRestart.Visible = this.IsTerminalViewActive;
+            if (this.btnTermBackToChat != null) this.btnTermBackToChat.Visible = this.IsTerminalViewActive;
+            LayoutChannelHeaderButtons();
+
+            if (this.IsTerminalViewActive)
+            {
+                string modTitle = (this.ActiveTerminalModule != null && !string.IsNullOrEmpty(this.ActiveTerminalModule.Name))
+                    ? this.ActiveTerminalModule.Name
+                    : Tr("파워쉘 (PowerShell)", "PowerShell");
+
+                this.lblChannelTopicHeader.Text = string.Format(
+                    Tr(">_ {0}   [Windows PowerShell 인터랙티브 콘솔]", ">_ {0}   [Windows PowerShell Interactive Console]"),
+                    modTitle
+                );
+                this.lblChannelSubTopic.Text = string.Format(
+                    Tr("작업 경로: {0}   (하단 입력창에 PowerShell 명령어 입력 · ↑/↓ 이전 명령어 · 좌측 상단 채널 클릭 시 채팅 복귀)",
+                       "WorkDir: {0}   (Type PowerShell commands below · Up/Down history · Click channel to return)"),
+                    this.psCurrentWorkDir
+                );
+                this.Text = string.Format(">_ {0} - Nyaa Chat Native", modTitle);
+
+                this.serverExtModuleBar.SuspendLayout();
+                this.serverExtModuleBar.Controls.Clear();
+
+                Label termBadge = new Label
+                {
+                    Text = Tr("[파워쉘 빠른 실행]:", "[PowerShell Quick]:"),
+                    AutoSize = true,
+                    ForeColor = Color.FromArgb(56, 189, 248),
+                    Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                    Margin = new Padding(2, 5, 6, 0)
+                };
+                this.serverExtModuleBar.Controls.Add(termBadge);
+
+                if (this.ActiveTerminalModule != null && this.ActiveTerminalModule.Buttons.Count > 0)
+                {
+                    foreach (KeyValuePair<string, string> btnKv in this.ActiveTerminalModule.Buttons)
+                    {
+                        string label = btnKv.Key;
+                        string rawAction = btnKv.Value;
+                        Button b = new Button
+                        {
+                            Text = label,
+                            AutoSize = true,
+                            Height = 24,
+                            FlatStyle = FlatStyle.Flat,
+                            BackColor = Color.FromArgb(14, 116, 144),
+                            ForeColor = Color.White,
+                            Font = new Font("맑은 고딕", 8.2f, FontStyle.Bold),
+                            Cursor = Cursors.Hand,
+                            Margin = new Padding(2, 1, 4, 1)
+                        };
+                        b.FlatAppearance.BorderSize = 0;
+                        b.Click += delegate
+                        {
+                            if (rawAction.StartsWith("/"))
+                            {
+                                ExecuteSlashCommand(rawAction);
+                            }
+                            else
+                            {
+                                ExecuteTerminalCommand(rawAction);
+                            }
+                            this.txtInput.Focus();
+                        };
+                        this.serverExtModuleBar.Controls.Add(b);
+                    }
+                }
+
+                Button btnCfgMod = new Button
+                {
+                    Text = Tr("⚙ 모듈 편집", "⚙ Edit Module"),
+                    AutoSize = true,
+                    Height = 24,
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextSecondary,
+                    Font = new Font("맑은 고딕", 8.2f),
+                    Cursor = Cursors.Hand,
+                    Margin = new Padding(4, 1, 2, 1)
+                };
+                btnCfgMod.FlatAppearance.BorderColor = this.ColBorder;
+                btnCfgMod.Click += delegate { OpenModulesManagerDialog(); };
+                this.serverExtModuleBar.Controls.Add(btnCfgMod);
+
+                this.serverExtModuleBar.Visible = true;
+                this.serverExtModuleBar.ResumeLayout();
+                return;
+            }
+
             if (this.ActiveSession == null) return;
 
             string topic = "";
@@ -2039,7 +3994,7 @@ namespace NyaaChatNative
             }
             if (string.IsNullOrEmpty(topic))
             {
-                topic = string.Format("{0} 서버의 {1} 대화방입니다.", this.ActiveSession.ServerName, this.ActiveRoomId);
+                topic = string.Format(Tr("{0} 서버의 {1} 대화방입니다.", "Channel {1} on {0}."), this.ActiveSession.ServerName, this.ActiveRoomId);
             }
 
             this.lblChannelTopicHeader.Text = string.Format(
@@ -2048,7 +4003,10 @@ namespace NyaaChatNative
                 modesBadge,
                 this.ActiveSession.ServerName
             );
-            this.lblChannelSubTopic.Text = "토픽: " + topic + "  (클릭/우클릭으로 토픽·모드 설정)";
+            this.lblChannelSubTopic.Text = Tr(
+                "토픽: " + topic + "  (클릭/우클릭으로 토픽·모드 설정)",
+                "Topic: " + topic + "  (Click/right-click to edit topic & modes)"
+            );
             this.Text = string.Format("{0} @ {1} - Nyaa Chat Native", this.ActiveRoomId, this.ActiveSession.ServerName);
 
             // Rebuild Per-Server Extended Commands & Module Bar
@@ -2056,14 +4014,14 @@ namespace NyaaChatNative
             this.serverExtModuleBar.SuspendLayout();
             this.serverExtModuleBar.Controls.Clear();
 
-            List<ClientModuleDef> activeMods = GetActiveModulesForSession(this.ActiveSession);
+            List<ClientModuleDef> activeMods = GetActiveModulesForSession(this.ActiveSession, false);
             bool hasAnyExt = (this.ActiveSession.ServerExtendedCommands.Count > 0) || (activeMods.Count > 0);
 
             if (hasAnyExt)
             {
                 Label badge = new Label
                 {
-                    Text = string.Format("[{0} 전용 확장]:", this.ActiveSession.ServerName),
+                    Text = string.Format(Tr("[{0} 전용 확장]:", "[{0} Extensions]:"), this.ActiveSession.ServerName),
                     AutoSize = true,
                     ForeColor = this.ColTextSystem,
                     Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
@@ -2119,23 +4077,66 @@ namespace NyaaChatNative
                         this.serverExtModuleBar.Controls.Add(b);
                     }
                 }
+
+                Button btnCfgMod = new Button
+                {
+                    Text = Tr("⚙ 모듈 관리", "⚙ Modules"),
+                    AutoSize = true,
+                    Height = 24,
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextSecondary,
+                    Font = new Font("맑은 고딕", 8.2f),
+                    Cursor = Cursors.Hand,
+                    Margin = new Padding(4, 1, 2, 1)
+                };
+                btnCfgMod.FlatAppearance.BorderColor = this.ColBorder;
+                btnCfgMod.Click += delegate { OpenModulesManagerDialog(); };
+                this.serverExtModuleBar.Controls.Add(btnCfgMod);
             }
 
             this.serverExtModuleBar.Visible = hasAnyExt;
             this.serverExtModuleBar.ResumeLayout();
         }
 
-        private List<ClientModuleDef> GetActiveModulesForSession(NyaaServerSession session)
+        private List<ClientModuleDef> GetActiveModulesForSession(NyaaServerSession session, bool includeTerminalModules = true)
         {
             List<ClientModuleDef> list = new List<ClientModuleDef>();
             if (session == null) return list;
 
             foreach (ClientModuleDef m in this.InstalledModules)
             {
+                if (!m.Enabled) continue;
+                if (!includeTerminalModules &&
+                    (string.Equals(m.ModuleType, "Terminal", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(m.Id, "PowerShell", StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
                 if (string.IsNullOrEmpty(m.TargetServer)) continue;
-                if (session.Host.IndexOf(m.TargetServer, StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    session.ServerName.IndexOf(m.TargetServer, StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    session.ServerUrl.IndexOf(m.TargetServer, StringComparison.OrdinalIgnoreCase) >= 0)
+
+                string t = m.TargetServer.Trim();
+                if (t == "*" || string.Equals(t, "all", StringComparison.OrdinalIgnoreCase) || string.Equals(t, "전체", StringComparison.OrdinalIgnoreCase))
+                {
+                    list.Add(m);
+                    continue;
+                }
+
+                bool matched = false;
+                foreach (string part in t.Split(new char[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    string sub = part.Trim();
+                    if (string.IsNullOrEmpty(sub)) continue;
+                    if (sub == "*" ||
+                        (!string.IsNullOrEmpty(session.Host) && session.Host.IndexOf(sub, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                        (!string.IsNullOrEmpty(session.ServerName) && session.ServerName.IndexOf(sub, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                        (!string.IsNullOrEmpty(session.ServerUrl) && session.ServerUrl.IndexOf(sub, StringComparison.OrdinalIgnoreCase) >= 0))
+                    {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (matched)
                 {
                     list.Add(m);
                 }
@@ -2256,7 +4257,7 @@ namespace NyaaChatNative
 
             if (this.ActiveSession == null)
             {
-                this.lblRightUsersTitle.Text = "참여자 (0명)";
+                this.lblRightUsersTitle.Text = Tr("참여자 (0명)", "Users (0)");
                 this.lstOnlineUsers.EndUpdate();
                 return;
             }
@@ -2281,11 +4282,11 @@ namespace NyaaChatNative
 
                 bool isOp = activeCh != null && activeCh.Operators.Contains(u.UserId);
                 string prefix = u.IsBot ? "^" : (u.IsServerOper ? "*" : (isOp ? "@" : "  "));
-                string meSuffix = string.Equals(u.UserId, this.ActiveSession.MyUserId, StringComparison.OrdinalIgnoreCase) ? " (나)" : "";
+                string meSuffix = string.Equals(u.UserId, this.ActiveSession.MyUserId, StringComparison.OrdinalIgnoreCase) ? Tr(" (나)", " (Me)") : "";
                 this.lstOnlineUsers.Items.Add(string.Format("{0}{1}{2}", prefix, u.Nickname, meSuffix));
             }
 
-            this.lblRightUsersTitle.Text = string.Format("참여자 ({0}명)", count);
+            this.lblRightUsersTitle.Text = string.Format(Tr("참여자 ({0}명)", "Users ({0})"), count);
             this.lstOnlineUsers.EndUpdate();
         }
 
@@ -2297,6 +4298,54 @@ namespace NyaaChatNative
             string raw = this.txtInput.Text.Trim();
             if (string.IsNullOrEmpty(raw)) return;
             this.txtInput.Clear();
+
+            if (this.chatHistory.Count == 0 || this.chatHistory[this.chatHistory.Count - 1] != raw)
+            {
+                this.chatHistory.Add(raw);
+                if (this.chatHistory.Count > 100) this.chatHistory.RemoveAt(0);
+            }
+            this.chatHistoryIndex = -1;
+            this.chatDraftText = "";
+            ResetTabCompletion();
+
+            if (this.IsTerminalViewActive)
+            {
+                if (raw.Equals("/chat", StringComparison.OrdinalIgnoreCase) ||
+                    raw.Equals("/back", StringComparison.OrdinalIgnoreCase) ||
+                    raw.Equals("/채팅", StringComparison.OrdinalIgnoreCase))
+                {
+                    ExitTerminalViewToChat();
+                    return;
+                }
+                if (raw.Equals("/clear", StringComparison.OrdinalIgnoreCase) ||
+                    raw.Equals("/cls", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (this.rtbTerminal != null) this.rtbTerminal.Clear();
+                    return;
+                }
+                if (raw.Equals("/restart", StringComparison.OrdinalIgnoreCase))
+                {
+                    RestartPowerShellSession();
+                    return;
+                }
+                if (raw.StartsWith("/settings", StringComparison.OrdinalIgnoreCase) ||
+                    raw.StartsWith("/config", StringComparison.OrdinalIgnoreCase) ||
+                    raw.StartsWith("/설정", StringComparison.OrdinalIgnoreCase) ||
+                    raw.StartsWith("/modules", StringComparison.OrdinalIgnoreCase) ||
+                    raw.StartsWith("/module", StringComparison.OrdinalIgnoreCase) ||
+                    raw.StartsWith("/모듈", StringComparison.OrdinalIgnoreCase) ||
+                    raw.StartsWith("/theme", StringComparison.OrdinalIgnoreCase) ||
+                    raw.StartsWith("/servers", StringComparison.OrdinalIgnoreCase) ||
+                    raw.StartsWith("/join ", StringComparison.OrdinalIgnoreCase) ||
+                    raw.StartsWith("/server ", StringComparison.OrdinalIgnoreCase))
+                {
+                    ExecuteSlashCommand(raw);
+                    return;
+                }
+
+                ExecuteTerminalCommand(raw);
+                return;
+            }
 
             if (raw.StartsWith("/"))
             {
@@ -2342,6 +4391,21 @@ namespace NyaaChatNative
             string cmd = (parts.Length > 0 ? parts[0] : "").ToLowerInvariant();
             string restText = trimmed.Length > cmd.Length + 1 ? trimmed.Substring(cmd.Length + 2).Trim() : "";
 
+            if (cmd == "powershell" || cmd == "terminal" || cmd == "파워쉘" || (cmd == "ps" && string.IsNullOrEmpty(restText)))
+            {
+                SwitchToTerminalModule(null);
+                if (!string.IsNullOrEmpty(restText))
+                {
+                    ExecuteTerminalCommand(restText);
+                }
+                return;
+            }
+            if (cmd == "chat" || cmd == "채팅")
+            {
+                ExitTerminalViewToChat();
+                return;
+            }
+
             // 1. Sacred Core Commands (100% Consistent Across All Servers)
             if (cmd == "servers" || cmd == "serverlist")
             {
@@ -2359,7 +4423,7 @@ namespace NyaaChatNative
                 int idx = 1;
                 if (parts[1].Equals("-m", StringComparison.OrdinalIgnoreCase) && parts.Length >= 3) idx = 2;
                 string targetSrv = parts[idx];
-                string targetCh = parts.Length > idx + 1 ? parts[idx + 1] : "#자유대화";
+                string targetCh = parts.Length > idx + 1 ? parts[idx + 1] : "";
                 ConnectOrSwitchToServer(targetSrv, targetCh, "");
                 return;
             }
@@ -2382,9 +4446,11 @@ namespace NyaaChatNative
             }
             if (cmd == "part" || cmd == "leave")
             {
+                string targetPart = (parts.Length >= 2 && !string.IsNullOrEmpty(parts[1])) ? parts[1].Trim() : this.ActiveRoomId;
+                if (!targetPart.StartsWith("#")) targetPart = "#" + targetPart;
                 if (this.ActiveSession != null)
                 {
-                    this.ActiveSession.Emit("part_channel", new Dictionary<string, object> { { "channelId", this.ActiveRoomId } });
+                    LeaveChannel(this.ActiveSession, targetPart);
                 }
                 return;
             }
@@ -2627,6 +4693,45 @@ namespace NyaaChatNative
                 ShowHelpNotice();
                 return;
             }
+            if (cmd == "settings" || cmd == "config" || cmd == "설정")
+            {
+                OpenIntegratedSettingsDialog(0);
+                return;
+            }
+            if (cmd == "modules" || cmd == "module" || cmd == "모듈")
+            {
+                OpenModulesManagerDialog();
+                return;
+            }
+            if (cmd == "theme" || cmd == "color" || cmd == "font")
+            {
+                OpenThemePaletteDialog();
+                return;
+            }
+            if (cmd == "lang" || cmd == "language")
+            {
+                string targetLang = restText.Trim().ToLowerInvariant();
+                if (string.IsNullOrEmpty(targetLang))
+                {
+                    targetLang = this.IsEnglish ? "ko" : "en";
+                }
+                else if (targetLang.StartsWith("en") || targetLang == "영어")
+                {
+                    targetLang = "en";
+                }
+                else
+                {
+                    targetLang = "ko";
+                }
+                SetLanguage(targetLang, true);
+                AppendSystemMessageToSession(
+                    this.ActiveSession,
+                    this.ActiveRoomId,
+                    Tr("* 클라이언트 표시 언어가 한국어(ko)로 변경되었습니다. (/lang en 으로 영어 전환 가능)",
+                       "* Client UI language changed to English (en). (Use /lang ko to switch to Korean)")
+                );
+                return;
+            }
 
             // 2. Check Active Server's Extended Commands (Active ONLY on this server!)
             if (this.ActiveSession != null)
@@ -2689,7 +4794,16 @@ namespace NyaaChatNative
                 return;
             }
 
-            AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, string.Format("* 알 수 없거나 현재 서버({0})에서 비활성화된 명령어입니다: /{1} (도움말: /help | 서버목록: /servers)", this.ActiveSession != null ? this.ActiveSession.ServerName : "없음", cmd));
+            AppendSystemMessageToSession(
+                this.ActiveSession,
+                this.ActiveRoomId,
+                string.Format(
+                    Tr("* 알 수 없거나 현재 서버({0})에서 비활성화된 명령어입니다: /{1} (도움말: /help | 서버목록: /servers)",
+                       "* Unknown or inactive command on server ({0}): /{1} (Help: /help | Servers: /servers)"),
+                    this.ActiveSession != null ? this.ActiveSession.ServerName : Tr("없음", "None"),
+                    cmd
+                )
+            );
         }
 
         private void ExecuteScriptActionLine(string rawRule, string restText)
@@ -2759,7 +4873,10 @@ namespace NyaaChatNative
                                     {
                                         if (sentLines >= MAX_CHAT_LINES)
                                         {
-                                            AppendSystemMessageToSession(session, roomId, "* [도배 방지] 외부 스크립트의 채팅 전송은 1회 최대 5줄까지만 전송됩니다.");
+                                            AppendSystemMessageToSession(session, roomId, Tr(
+                                                "* [도배 방지] 외부 스크립트의 채팅 전송은 1회 최대 5줄까지만 전송됩니다.",
+                                                "* [Anti-Flood] External script output is capped at 5 chat lines per execution."
+                                            ));
                                             break;
                                         }
                                         if (clean.Length > MAX_LINE_CHARS)
@@ -2791,7 +4908,7 @@ namespace NyaaChatNative
                 {
                     this.BeginInvoke((MethodInvoker)delegate
                     {
-                        AppendSystemMessageToSession(session, roomId, "* [스크립트 실행 오류]: " + ex.Message);
+                        AppendSystemMessageToSession(session, roomId, Tr("* [스크립트 실행 오류]: ", "* [Script Execution Error]: ") + ex.Message);
                     });
                 }
             });
@@ -2857,8 +4974,9 @@ namespace NyaaChatNative
                  !string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase)))
             {
                 MessageBox.Show(
-                    "보안 정책에 따라 웹 주소(http:// 또는 https://)가 아닌 링크는 실행이 차단되었습니다.\r\n\r\n차단된 경로: " + rawUrl,
-                    "보안 차단 안내",
+                    Tr("보안 정책에 따라 웹 주소(http:// 또는 https://)가 아닌 링크는 실행이 차단되었습니다.\r\n\r\n차단된 경로: ",
+                       "For security, non-HTTP(S) links are blocked from executing.\r\n\r\nBlocked target: ") + rawUrl,
+                    Tr("보안 차단 안내", "Security Block Notice"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning
                 );
@@ -2870,7 +4988,7 @@ namespace NyaaChatNative
             {
                 using (Form dlg = new Form())
                 {
-                    dlg.Text = "외부 링크 열기 확인";
+                    dlg.Text = Tr("외부 링크 열기 확인", "Confirm Opening External Link");
                     dlg.Size = new Size(480, 235);
                     dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                     dlg.StartPosition = FormStartPosition.CenterParent;
@@ -2878,10 +4996,12 @@ namespace NyaaChatNative
                     dlg.MinimizeBox = false;
                     dlg.BackColor = this.ColBgWindow;
                     dlg.ForeColor = this.ColTextPrimary;
+                    ApplyWindowTitleBarTheme(dlg);
 
                     Label lblTitle = new Label
                     {
-                        Text = "채팅창의 외부 링크를 웹 브라우저로 열려고 합니다.\r\n접속하려는 주소가 안전한 사이트인지 확인해 주세요.",
+                        Text = Tr("채팅창의 외부 링크를 웹 브라우저로 열려고 합니다.\r\n접속하려는 주소가 안전한 사이트인지 확인해 주세요.",
+                                  "You are about to open an external link in your web browser.\r\nPlease verify that the destination URL is trustworthy."),
                         Location = new Point(18, 14),
                         Size = new Size(430, 38),
                         Font = new Font("맑은 고딕", 9.2f, FontStyle.Bold),
@@ -2901,7 +5021,7 @@ namespace NyaaChatNative
 
                     CheckBox chkSkipNext = new CheckBox
                     {
-                        Text = "다음부터 외부 링크 클릭 시 이 경고창을 표시하지 않기",
+                        Text = Tr("다음부터 외부 링크 클릭 시 이 경고창을 표시하지 않기", "Do not show this warning again when clicking external links"),
                         Checked = false,
                         Location = new Point(18, 96),
                         AutoSize = true,
@@ -2910,7 +5030,7 @@ namespace NyaaChatNative
 
                     Button btnOpen = new Button
                     {
-                        Text = "웹 브라우저로 열기",
+                        Text = Tr("웹 브라우저로 열기", "Open in Browser"),
                         Location = new Point(214, 140),
                         Size = new Size(136, 34),
                         FlatStyle = FlatStyle.Flat,
@@ -2922,7 +5042,7 @@ namespace NyaaChatNative
 
                     Button btnCancel = new Button
                     {
-                        Text = "취소",
+                        Text = Tr("취소", "Cancel"),
                         Location = new Point(358, 140),
                         Size = new Size(88, 34),
                         FlatStyle = FlatStyle.Flat,
@@ -2957,34 +5077,76 @@ namespace NyaaChatNative
         private void ShowHelpNotice()
         {
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine("================ [ Nyaa Chat 표준 & 다중서버 명령어 안내 ] ================");
-            sb.AppendLine("• /servers (또는 F2) : 화이트리스트 네트워크 서버 리스트 및 공개 채널 탐색");
-            sb.AppendLine("• /server <서버주소> [#채널] : 현재 서버를 유지한 채 새 서버에 동시 접속");
-            sb.AppendLine("• /join #채널명 [비밀번호] : 현재 서버 내 채널 입장 (생성)");
-            sb.AppendLine("• /part : 현재 채널 나가기  |  /nick <새닉네임> : 닉네임 변경");
-            sb.AppendLine("• /topic [새주제] : 채널 토픽/모드 설정창 열기 또는 토픽 즉시 변경");
-            sb.AppendLine("• /mode [+ntpsmikl] [옵션] : 채널 모드 변경 (예: /mode +k 1234, /mode +m, /mode +v 닉네임)");
-            sb.AppendLine("• /invite <닉네임> : 현재 채널로 초대  |  /op · /deop · /kick <닉네임> : 방장 권한");
-            sb.AppendLine("• /whois <닉네임> : 유저 정보 조회  |  /me <행동> : 행동 묘사");
-            sb.AppendLine("• /112 : 불법/유해 정보 신고  |  /export : 로그 폴더 열기  |  /clear : 화면 지우기");
-            if (this.ActiveSession != null && this.ActiveSession.IsMeServerOper)
+            if (this.IsEnglish)
             {
-                sb.AppendLine("---------------- [ 서버 총괄 관리자(/oper) 전용 명령어 ] ----------------");
-                sb.AppendLine("• /servername <이름> : 이 서버의 표시 이름 변경 (예: A서버, C서버)");
-                sb.AppendLine("• /serverurl <https://주소> : 이 서버의 공식 외부 접속 주소 설정");
-                sb.AppendLine("• /peer add <https://이웃서버주소> : 수동 화이트리스트에 이웃 서버 등록 및 즉시 동기화");
-                sb.AppendLine("• /peer list / /peer del <주소> / /peer sync : 화이트리스트 서버 목록 관리");
-                sb.AppendLine("• /extcmd add </명령어> <설명 | 응답> : 이 서버 전용 확장 명령어 등록 (타 서버 자동 비활성화)");
-            }
-            if (this.ActiveSession != null && this.ActiveSession.ServerExtendedCommands.Count > 0)
-            {
-                sb.AppendFormat("---------------- [ 현재 서버({0}) 전용 확장 명령어 ] ----------------\r\n", this.ActiveSession.ServerName);
-                foreach (ServerExtCommand c in this.ActiveSession.ServerExtendedCommands)
+                sb.AppendLine("================ [ Nyaa Chat Core & Multi-Server Commands ] ================");
+                sb.AppendLine("• /servers (or F2) : Browse whitelisted network servers and public channels");
+                sb.AppendLine("• /server <url> [#channel] : Connect to an additional server simultaneously");
+                sb.AppendLine("• /join #channel [key] : Join or create a channel on the active server");
+                sb.AppendLine("• /part : Leave current channel  |  /nick <newNick> : Change nickname");
+                sb.AppendLine("• /topic [text] : Open Topic/Mode dialog or set channel topic");
+                sb.AppendLine("• /mode [+ntpsmikl] [args] : Set channel modes (e.g. /mode +k 1234, /mode +v nick)");
+                sb.AppendLine("• /invite <nick> : Invite user  |  /op · /deop · /kick <nick> : Channel Op controls");
+                sb.AppendLine("• /whois <nick> : Query user info  |  /me <action> : Send action message");
+                sb.AppendLine("• /112 (or /report) : Report abuse  |  /export : Open logs folder  |  /clear : Clear chat");
+                sb.AppendLine("• /settings (or /config, F10) : Open All-in-One Integrated Settings Center");
+                sb.AppendLine("• /modules (or /module) : Open Server Modules Manager (Add/Import/Toggle/Edit)");
+                sb.AppendLine("• /theme (or /color, /font) : Open Color Palette & Font Customizer");
+                sb.AppendLine("• /lang [ko|en] : Switch UI language between Korean (ko) and English (en)");
+                if (this.ActiveSession != null && this.ActiveSession.IsMeServerOper)
                 {
-                    sb.AppendFormat("• {0} : {1}\r\n", c.Cmd, c.Desc);
+                    sb.AppendLine("---------------- [ Server Operator (/oper) Commands ] ----------------");
+                    sb.AppendLine("• /servername <name> : Set display name for this server");
+                    sb.AppendLine("• /serverurl <https://url> : Set public canonical URL for this server");
+                    sb.AppendLine("• /peer add <https://peerUrl> : Add peer server to manual whitelist & sync");
+                    sb.AppendLine("• /peer list / /peer del <url> / /peer sync : Manage whitelisted peers");
+                    sb.AppendLine("• /extcmd add </cmd> <desc | reply> : Register server-specific extended command");
                 }
+                if (this.ActiveSession != null && this.ActiveSession.ServerExtendedCommands.Count > 0)
+                {
+                    sb.AppendFormat("---------------- [ Server Extensions ({0}) ] ----------------\r\n", this.ActiveSession.ServerName);
+                    foreach (ServerExtCommand c in this.ActiveSession.ServerExtendedCommands)
+                    {
+                        sb.AppendFormat("• {0} : {1}\r\n", c.Cmd, c.Desc);
+                    }
+                }
+                sb.Append("============================================================================");
             }
-            sb.Append("===========================================================================");
+            else
+            {
+                sb.AppendLine("================ [ Nyaa Chat 표준 & 다중서버 명령어 안내 ] ================");
+                sb.AppendLine("• /servers (또는 F2) : 화이트리스트 네트워크 서버 리스트 및 공개 채널 탐색");
+                sb.AppendLine("• /server <서버주소> [#채널] : 현재 서버를 유지한 채 새 서버에 동시 접속");
+                sb.AppendLine("• /join #채널명 [비밀번호] : 현재 서버 내 채널 입장 (생성)");
+                sb.AppendLine("• /part : 현재 채널 나가기  |  /nick <새닉네임> : 닉네임 변경");
+                sb.AppendLine("• /topic [새주제] : 채널 토픽/모드 설정창 열기 또는 토픽 즉시 변경");
+                sb.AppendLine("• /mode [+ntpsmikl] [옵션] : 채널 모드 변경 (예: /mode +k 1234, /mode +m, /mode +v 닉네임)");
+                sb.AppendLine("• /invite <닉네임> : 현재 채널로 초대  |  /op · /deop · /kick <닉네임> : 방장 권한");
+                sb.AppendLine("• /whois <닉네임> : 유저 정보 조회  |  /me <행동> : 행동 묘사");
+                sb.AppendLine("• /112 : 불법/유해 정보 신고  |  /export : 로그 폴더 열기  |  /clear : 화면 지우기");
+                sb.AppendLine("• /settings (또는 /설정, F10) : 설정창 열기 (간편설정 · 고급설정)");
+                sb.AppendLine("• /modules (또는 /모듈) : 서버별 확장 모듈 추가 · 가져오기 · 켜기/끄기 관리창 열기");
+                sb.AppendLine("• /theme (또는 /color, /font) : 색상 팔레트 · 글꼴 설정창 열기");
+                sb.AppendLine("• /lang [ko|en] : 클라이언트 표시 언어 전환 (ko: 한국어 기본 / en: 영어)");
+                if (this.ActiveSession != null && this.ActiveSession.IsMeServerOper)
+                {
+                    sb.AppendLine("---------------- [ 서버 총괄 관리자(/oper) 전용 명령어 ] ----------------");
+                    sb.AppendLine("• /servername <이름> : 이 서버의 표시 이름 변경 (예: A서버, C서버)");
+                    sb.AppendLine("• /serverurl <https://주소> : 이 서버의 공식 외부 접속 주소 설정");
+                    sb.AppendLine("• /peer add <https://이웃서버주소> : 수동 화이트리스트에 이웃 서버 등록 및 즉시 동기화");
+                    sb.AppendLine("• /peer list / /peer del <주소> / /peer sync : 화이트리스트 서버 목록 관리");
+                    sb.AppendLine("• /extcmd add </명령어> <설명 | 응답> : 이 서버 전용 확장 명령어 등록 (타 서버 자동 비활성화)");
+                }
+                if (this.ActiveSession != null && this.ActiveSession.ServerExtendedCommands.Count > 0)
+                {
+                    sb.AppendFormat("---------------- [ 현재 서버({0}) 전용 확장 명령어 ] ----------------\r\n", this.ActiveSession.ServerName);
+                    foreach (ServerExtCommand c in this.ActiveSession.ServerExtendedCommands)
+                    {
+                        sb.AppendFormat("• {0} : {1}\r\n", c.Cmd, c.Desc);
+                    }
+                }
+                sb.Append("===========================================================================");
+            }
             AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, sb.ToString());
         }
 
@@ -3016,22 +5178,23 @@ namespace NyaaChatNative
         {
             using (Form dlg = new Form())
             {
-                dlg.Text = "다른 서버 동시 접속 (/server -m)";
+                dlg.Text = Tr("다른 서버 동시 접속 (/server -m)", "Connect to Another Server Simultaneously (/server -m)");
                 dlg.Size = new Size(420, 210);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
                 dlg.BackColor = this.ColBgWindow;
                 dlg.ForeColor = this.ColTextPrimary;
+                ApplyWindowTitleBarTheme(dlg);
 
-                Label l1 = new Label { Text = "추가로 접속할 서버 주소 (현재 서버 연결은 그대로 유지됩니다):", Location = new Point(16, 16), AutoSize = true };
+                Label l1 = new Label { Text = Tr("추가로 접속할 서버 주소 (현재 서버 연결은 그대로 유지됩니다):", "Server URL to connect (keeps current server connection active):"), Location = new Point(16, 16), AutoSize = true };
                 TextBox tUrl = new TextBox { Text = "https://", Location = new Point(16, 40), Width = 370, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
 
-                Label l2 = new Label { Text = "입장할 채널명:", Location = new Point(16, 76), AutoSize = true };
+                Label l2 = new Label { Text = Tr("입장할 채널명:", "Channel to join:"), Location = new Point(16, 76), AutoSize = true };
                 TextBox tChan = new TextBox { Text = "#소드걸스", Location = new Point(16, 98), Width = 200, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
 
                 Button bOk = new Button
                 {
-                    Text = "새 서버창으로 동시 접속",
+                    Text = Tr("새 서버창으로 동시 접속", "Connect Simultaneously"),
                     Location = new Point(16, 132),
                     Size = new Size(370, 32),
                     FlatStyle = FlatStyle.Flat,
@@ -3057,21 +5220,26 @@ namespace NyaaChatNative
             if (session == null || string.IsNullOrEmpty(channelId)) return;
             using (Form dlg = new Form())
             {
-                dlg.Text = string.Format("[{0}] 채널 비밀번호 입력", channelId);
+                dlg.Text = Tr(
+                    string.Format("[{0}] 채널 비밀번호 입력", channelId),
+                    string.Format("[{0}] Enter Channel Password", channelId));
                 dlg.Size = new Size(380, 195);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
                 dlg.BackColor = this.ColBgWindow;
                 dlg.ForeColor = this.ColTextPrimary;
+                ApplyWindowTitleBarTheme(dlg);
 
                 Label lInfo = new Label
                 {
-                    Text = string.IsNullOrEmpty(serverMessage) ? string.Format("{0} 채널은 비밀번호(+k)가 설정되어 있습니다.", channelId) : serverMessage,
+                    Text = string.IsNullOrEmpty(serverMessage)
+                        ? Tr(string.Format("{0} 채널은 비밀번호(+k)가 설정되어 있습니다.", channelId), string.Format("Channel {0} requires a password (+k).", channelId))
+                        : serverMessage,
                     Location = new Point(16, 16),
                     Size = new Size(335, 36),
                     ForeColor = this.ColTextSystem
                 };
-                Label lKey = new Label { Text = "채널 비밀번호 (+k):", Location = new Point(16, 58), AutoSize = true };
+                Label lKey = new Label { Text = Tr("채널 비밀번호 (+k):", "Channel Password (+k):"), Location = new Point(16, 58), AutoSize = true };
                 TextBox tKey = new TextBox
                 {
                     Location = new Point(16, 80),
@@ -3083,7 +5251,7 @@ namespace NyaaChatNative
 
                 Button bOk = new Button
                 {
-                    Text = "비밀번호로 입장",
+                    Text = Tr("비밀번호로 입장", "Join with Password"),
                     Location = new Point(16, 114),
                     Size = new Size(220, 32),
                     FlatStyle = FlatStyle.Flat,
@@ -3092,7 +5260,7 @@ namespace NyaaChatNative
                 };
                 Button bCancel = new Button
                 {
-                    Text = "취소",
+                    Text = Tr("취소", "Cancel"),
                     Location = new Point(246, 114),
                     Size = new Size(100, 32),
                     FlatStyle = FlatStyle.Flat,
@@ -3129,21 +5297,24 @@ namespace NyaaChatNative
             if (this.ActiveSession == null) return;
             using (Form dlg = new Form())
             {
-                dlg.Text = string.Format("[{0}] 새 채널 개설 / 입장", this.ActiveSession.ServerName);
+                dlg.Text = Tr(
+                    string.Format("[{0}] 새 채널 개설 / 입장", this.ActiveSession.ServerName),
+                    string.Format("[{0}] Create / Join Channel", this.ActiveSession.ServerName));
                 dlg.Size = new Size(440, 360);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
                 dlg.BackColor = this.ColBgWindow;
                 dlg.ForeColor = this.ColTextPrimary;
+                ApplyWindowTitleBarTheme(dlg);
 
-                Label lCh = new Label { Text = "채널 이름 (# 자동 부착):", Location = new Point(16, 16), AutoSize = true, Font = new Font("맑은 고딕", 9f, FontStyle.Bold) };
+                Label lCh = new Label { Text = Tr("채널 이름 (# 자동 부착):", "Channel Name (auto-prefixed with #):"), Location = new Point(16, 16), AutoSize = true, Font = new Font("맑은 고딕", 9f, FontStyle.Bold) };
                 TextBox tCh = new TextBox { Text = "#소드걸스", Location = new Point(16, 38), Width = 390, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
 
-                Label lTopic = new Label { Text = "채널 토픽 (방 주제, 신설 시 적용):", Location = new Point(16, 72), AutoSize = true };
+                Label lTopic = new Label { Text = Tr("채널 토픽 (방 주제, 신설 시 적용):", "Channel Topic (applied when creating new channel):"), Location = new Point(16, 72), AutoSize = true };
                 TextBox tTopic = new TextBox { Text = "", Location = new Point(16, 94), Width = 390, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
 
-                Label lVis = new Label { Text = "공개 설정 (채널 모드):", Location = new Point(16, 130), AutoSize = true };
-                ComboBox cbVis = new ComboBox
+                Label lVis = new Label { Text = Tr("공개 설정 (채널 모드):", "Visibility (Channel Mode):"), Location = new Point(16, 130), AutoSize = true };
+                ComboBox cbVis = new ThemedComboBox
                 {
                     Location = new Point(16, 152),
                     Width = 390,
@@ -3151,15 +5322,15 @@ namespace NyaaChatNative
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary
                 };
-                cbVis.Items.Add("공개 채널 (기본 - 목록 및 토픽 전체 공개)");
-                cbVis.Items.Add("비공개 채널 (+p : 채널 목록에서 토픽 숨김)");
-                cbVis.Items.Add("비밀 채널 (+s : /list 및 좌측 채널 목록에서 완전 숨김)");
+                cbVis.Items.Add(Tr("공개 채널 (기본 - 목록 및 토픽 전체 공개)", "Public Channel (Default - listed with topic)"));
+                cbVis.Items.Add(Tr("비공개 채널 (+p : 채널 목록에서 토픽 숨김)", "Private Channel (+p : hides topic in channel list)"));
+                cbVis.Items.Add(Tr("비밀 채널 (+s : /list 및 좌측 채널 목록에서 완전 숨김)", "Secret Channel (+s : completely hidden from /list & tree)"));
                 cbVis.SelectedIndex = 0;
 
-                Label lKey = new Label { Text = "채널 비밀번호 (+k, 선택):", Location = new Point(16, 190), AutoSize = true };
+                Label lKey = new Label { Text = Tr("채널 비밀번호 (+k, 선택):", "Channel Key (+k, optional):"), Location = new Point(16, 190), AutoSize = true };
                 TextBox tKey = new TextBox { Text = "", Location = new Point(16, 212), Width = 220, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
 
-                Label lLimit = new Label { Text = "최대 인원 (+l, 0=무제한):", Location = new Point(250, 190), AutoSize = true };
+                Label lLimit = new Label { Text = Tr("최대 인원 (+l, 0=무제한):", "User Limit (+l, 0=unlimited):"), Location = new Point(250, 190), AutoSize = true };
                 NumericUpDown numLimit = new NumericUpDown
                 {
                     Location = new Point(250, 212),
@@ -3173,7 +5344,7 @@ namespace NyaaChatNative
 
                 Label lHint = new Label
                 {
-                    Text = "* 처음 개설하는 채널이면 귀하에게 자동으로 방장(@) 권한이 부여됩니다.",
+                    Text = Tr("* 처음 개설하는 채널이면 귀하에게 자동으로 방장(@) 권한이 부여됩니다.", "* If creating a new channel, you will automatically receive Channel Op (@)."),
                     Location = new Point(16, 248),
                     AutoSize = true,
                     ForeColor = this.ColTextTimestamp
@@ -3181,7 +5352,7 @@ namespace NyaaChatNative
 
                 Button bOk = new Button
                 {
-                    Text = "채널 개설 / 입장하기",
+                    Text = Tr("채널 개설 / 입장하기", "Create / Join Channel"),
                     Location = new Point(16, 276),
                     Size = new Size(390, 34),
                     FlatStyle = FlatStyle.Flat,
@@ -3228,38 +5399,42 @@ namespace NyaaChatNative
 
             using (Form dlg = new Form())
             {
-                dlg.Text = string.Format("{0} ({1}) 토픽 및 채널 모드 설정", this.ActiveRoomId, this.ActiveSession.ServerName);
+                dlg.Text = Tr(
+                    string.Format("{0} ({1}) 토픽 및 채널 모드 설정", this.ActiveRoomId, this.ActiveSession.ServerName),
+                    string.Format("{0} ({1}) Topic & Channel Modes", this.ActiveRoomId, this.ActiveSession.ServerName));
                 dlg.Size = new Size(460, 445);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
                 dlg.BackColor = this.ColBgWindow;
                 dlg.ForeColor = this.ColTextPrimary;
+                ApplyWindowTitleBarTheme(dlg);
 
                 Label lBadge = new Label
                 {
-                    Text = string.Format("현재 채널: {0}   |   현재 모드: [{1}]   |   내 권한: {2}",
-                        this.ActiveRoomId,
-                        currentModes,
-                        isMyOp ? "방장(@) / 관리자" : "일반 참여자"),
+                    Text = Tr(
+                        string.Format("현재 채널: {0}   |   현재 모드: [{1}]   |   내 권한: {2}",
+                            this.ActiveRoomId, currentModes, isMyOp ? "방장(@) / 관리자" : "일반 참여자"),
+                        string.Format("Channel: {0}   |   Modes: [{1}]   |   Role: {2}",
+                            this.ActiveRoomId, currentModes, isMyOp ? "ChanOp(@) / Oper" : "Member")),
                     Location = new Point(16, 14),
                     AutoSize = true,
                     ForeColor = this.ColTextSystem,
                     Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold)
                 };
 
-                Label lTopic = new Label { Text = "채널 토픽 (방 주제):", Location = new Point(16, 42), AutoSize = true, Font = new Font("맑은 고딕", 9f, FontStyle.Bold) };
+                Label lTopic = new Label { Text = Tr("채널 토픽 (방 주제):", "Channel Topic:"), Location = new Point(16, 42), AutoSize = true, Font = new Font("맑은 고딕", 9f, FontStyle.Bold) };
                 TextBox tTopic = new TextBox { Text = currentTopic, Location = new Point(16, 64), Width = 410, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
 
                 GroupBox grpModes = new GroupBox
                 {
-                    Text = "채널 모드 및 보안 설정 (방장 @ 또는 서버 관리자 권한 필요)",
+                    Text = Tr("채널 모드 및 보안 설정 (방장 @ 또는 서버 관리자 권한 필요)", "Channel Modes & Security (Requires @Op or Server Admin)"),
                     Location = new Point(16, 100),
                     Size = new Size(410, 245),
                     ForeColor = this.ColTextPrimary
                 };
 
-                Label lVis = new Label { Text = "공개 범위:", Location = new Point(14, 28), AutoSize = true };
-                ComboBox cbVis = new ComboBox
+                Label lVis = new Label { Text = Tr("공개 범위:", "Visibility:"), Location = new Point(14, 28), AutoSize = true };
+                ComboBox cbVis = new ThemedComboBox
                 {
                     Location = new Point(14, 48),
                     Width = 380,
@@ -3267,14 +5442,14 @@ namespace NyaaChatNative
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary
                 };
-                cbVis.Items.Add("공개 채널 (-p -s : 누구나 목록에서 볼 수 있음)");
-                cbVis.Items.Add("비공개 채널 (+p : 채널 목록에서 토픽을 숨김)");
-                cbVis.Items.Add("비밀 채널 (+s : 채널 목록에서 채널 자체를 숨김)");
+                cbVis.Items.Add(Tr("공개 채널 (-p -s : 누구나 목록에서 볼 수 있음)", "Public Channel (-p -s : visible to everyone)"));
+                cbVis.Items.Add(Tr("비공개 채널 (+p : 채널 목록에서 토픽을 숨김)", "Private Channel (+p : hides topic in channel list)"));
+                cbVis.Items.Add(Tr("비밀 채널 (+s : 채널 목록에서 채널 자체를 숨김)", "Secret Channel (+s : hides channel from list)"));
                 if (chInfo != null && chInfo.IsSecret) cbVis.SelectedIndex = 2;
                 else if (chInfo != null && chInfo.IsPrivate) cbVis.SelectedIndex = 1;
                 else cbVis.SelectedIndex = 0;
 
-                Label lKey = new Label { Text = "입장 비밀번호 (+k, 빈칸=해제):", Location = new Point(14, 84), AutoSize = true };
+                Label lKey = new Label { Text = Tr("입장 비밀번호 (+k, 빈칸=해제):", "Password (+k, blank=none):"), Location = new Point(14, 84), AutoSize = true };
                 TextBox tKey = new TextBox
                 {
                     Text = chInfo != null ? (chInfo.Key ?? "") : "",
@@ -3284,7 +5459,7 @@ namespace NyaaChatNative
                     ForeColor = this.ColTextPrimary
                 };
 
-                Label lLimit = new Label { Text = "최대 인원 (+l, 0=해제):", Location = new Point(244, 84), AutoSize = true };
+                Label lLimit = new Label { Text = Tr("최대 인원 (+l, 0=해제):", "Max Users (+l, 0=none):"), Location = new Point(244, 84), AutoSize = true };
                 NumericUpDown numLimit = new NumericUpDown
                 {
                     Location = new Point(244, 104),
@@ -3298,21 +5473,21 @@ namespace NyaaChatNative
 
                 CheckBox chkT = new CheckBox
                 {
-                    Text = "방장(@)만 토픽 변경 가능 (+t 모드)",
+                    Text = Tr("방장(@)만 토픽 변경 가능 (+t 모드)", "Only Op(@) can change topic (+t mode)"),
                     Location = new Point(14, 142),
                     AutoSize = true,
                     Checked = chInfo == null || chInfo.IsTopicProtected
                 };
                 CheckBox chkM = new CheckBox
                 {
-                    Text = "발언권 제어 채널 (+m 모드 : @방장 및 +v 유저만 채팅 가능)",
+                    Text = Tr("발언권 제어 채널 (+m 모드 : @방장 및 +v 유저만 채팅 가능)", "Moderated channel (+m : only @Op and +v Voice can speak)"),
                     Location = new Point(14, 170),
                     AutoSize = true,
                     Checked = chInfo != null && chInfo.IsModerated
                 };
                 CheckBox chkI = new CheckBox
                 {
-                    Text = "초대 전용 채널 (+i 모드 : /invite 받은 유저만 입장 가능)",
+                    Text = Tr("초대 전용 채널 (+i 모드 : /invite 받은 유저만 입장 가능)", "Invite-only channel (+i : requires /invite to join)"),
                     Location = new Point(14, 198),
                     AutoSize = true,
                     Checked = chInfo != null && chInfo.IsInviteOnly
@@ -3322,7 +5497,7 @@ namespace NyaaChatNative
 
                 Button bOk = new Button
                 {
-                    Text = "토픽 및 채널 모드 저장",
+                    Text = Tr("토픽 및 채널 모드 저장", "Save Topic & Channel Modes"),
                     Location = new Point(16, 358),
                     Size = new Size(300, 34),
                     FlatStyle = FlatStyle.Flat,
@@ -3332,7 +5507,7 @@ namespace NyaaChatNative
                 };
                 Button bCancel = new Button
                 {
-                    Text = "닫기",
+                    Text = Tr("닫기", "Close"),
                     Location = new Point(326, 358),
                     Size = new Size(100, 34),
                     FlatStyle = FlatStyle.Flat,
@@ -3380,20 +5555,25 @@ namespace NyaaChatNative
             }
             if (candidates.Count == 0)
             {
-                MessageBox.Show("현재 채널에 신고할 수 있는 최근 대화 내역이 없습니다.", "신고 안내", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(
+                    Tr("현재 채널에 신고할 수 있는 최근 대화 내역이 없습니다.", "There are no recent messages to report in this channel."),
+                    Tr("신고 안내", "Report Notice"),
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
                 return;
             }
 
             using (Form dlg = new Form())
             {
-                dlg.Text = "유해/불법 메시지 신고 (/112)";
+                dlg.Text = Tr("유해/불법 메시지 신고 (/112)", "Report Harmful/Illegal Message (/112)");
                 dlg.Size = new Size(460, 320);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
                 dlg.BackColor = this.ColBgWindow;
                 dlg.ForeColor = this.ColTextPrimary;
+                ApplyWindowTitleBarTheme(dlg);
 
-                Label l1 = new Label { Text = "신고할 메시지 선택:", Location = new Point(16, 14), AutoSize = true };
+                Label l1 = new Label { Text = Tr("신고할 메시지 선택:", "Select message to report:"), Location = new Point(16, 14), AutoSize = true };
                 ListBox lb = new ListBox { Location = new Point(16, 36), Size = new Size(410, 140), BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
                 for (int i = candidates.Count - 1; i >= 0 && lb.Items.Count < 30; i--)
                 {
@@ -3402,12 +5582,12 @@ namespace NyaaChatNative
                 }
                 if (lb.Items.Count > 0) lb.SelectedIndex = 0;
 
-                Label l2 = new Label { Text = "신고 사유:", Location = new Point(16, 186), AutoSize = true };
-                TextBox tReason = new TextBox { Text = "불법 촬영물 / 도배 / 욕설", Location = new Point(16, 208), Width = 410, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
+                Label l2 = new Label { Text = Tr("신고 사유:", "Reason for report:"), Location = new Point(16, 186), AutoSize = true };
+                TextBox tReason = new TextBox { Text = Tr("불법 촬영물 / 도배 / 욕설", "Illegal content / Spam / Abuse"), Location = new Point(16, 208), Width = 410, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
 
                 Button bSubmit = new Button
                 {
-                    Text = "신고 접수",
+                    Text = Tr("신고 접수", "Submit Report"),
                     Location = new Point(16, 242),
                     Size = new Size(410, 32),
                     FlatStyle = FlatStyle.Flat,
@@ -3426,7 +5606,7 @@ namespace NyaaChatNative
                             { "reason", tReason.Text.Trim() },
                             { "details", tReason.Text.Trim() }
                         });
-                        AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, "* 신고가 정상적으로 서버 관리자에게 접수되었습니다.");
+                        AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, Tr("* 신고가 정상적으로 서버 관리자에게 접수되었습니다.", "* Your report has been submitted to the server administrators."));
                         dlg.Close();
                     }
                 };
@@ -3436,236 +5616,2486 @@ namespace NyaaChatNative
         }
 
         // ====================================================================
-        // Built-in Script / Theme / Module Editor (Alt + R)
+        // Unified Settings Dialog (F10 / /settings / /theme / Alt+R)
+        // Left Sidebar Navigation:
+        //   - [★ 간편 설정] (Default view on open)
+        //   - [⚙ 고급 설정 (전체 옵션)] (Expands 5 detailed categories below)
         // ====================================================================
-        public void OpenScriptEditorDialog(string initialTab)
+        private static string ColorToHex(Color c)
         {
-            Form dlg = new Form
-            {
-                Text = "Nyaa Chat 내장 스크립트 / 테마 / 모듈 편집기 (Alt+R)",
-                Size = new Size(760, 540),
-                StartPosition = FormStartPosition.CenterParent,
-                BackColor = this.ColBgWindow,
-                ForeColor = this.ColTextPrimary
-            };
-
-            FlowLayoutPanel tabBar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 36, Padding = new Padding(6, 4, 6, 4), BackColor = this.ColBgHeader };
-            TextBox editor = new TextBox
-            {
-                Multiline = true,
-                ScrollBars = ScrollBars.Both,
-                WordWrap = false,
-                AcceptsTab = true,
-                Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(11, 17, 32),
-                ForeColor = Color.FromArgb(248, 250, 252),
-                Font = new Font("Consolas", 10.5f)
-            };
-
-            Panel bottomBar = new Panel { Dock = DockStyle.Bottom, Height = 42, BackColor = this.ColBgToolbar };
-            Label lblStatus = new Label { Text = "파일을 수정한 뒤 [저장 및 즉시 적용 (Ctrl+S)]을 누르면 재시작 없이 반영됩니다.", Location = new Point(10, 12), AutoSize = true, ForeColor = this.ColTextSecondary };
-            Button btnSave = new Button
-            {
-                Text = "저장 및 즉시 적용 (Ctrl+S)",
-                Size = new Size(190, 30),
-                Location = new Point(540, 6),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right,
-                FlatStyle = FlatStyle.Flat,
-                BackColor = this.ColAccent,
-                ForeColor = Color.White,
-                Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
-            };
-            bottomBar.Controls.Add(lblStatus);
-            bottomBar.Controls.Add(btnSave);
-
-            string currentRelPath = initialTab;
-            Action<string> loadFileIntoEditor = delegate (string rel)
-            {
-                currentRelPath = rel;
-                string full = Path.Combine(this.BaseDir, rel.Replace('/', '\\'));
-                editor.Text = File.Exists(full) ? File.ReadAllText(full, Encoding.UTF8) : "";
-                lblStatus.Text = "현재 편집 중: " + rel;
-            };
-
-            Action saveCurrentFile = delegate
-            {
-                string full = Path.Combine(this.BaseDir, currentRelPath.Replace('/', '\\'));
-                File.WriteAllText(full, editor.Text, Encoding.UTF8);
-                ReloadAllConfigsAndScripts();
-                RefreshThemeDropdown();
-                ApplyThemeColorsToUI();
-                UpdateHeaderAndModuleBar();
-                RedrawActiveChatHistory();
-                lblStatus.Text = "[" + currentRelPath + "] 저장 및 실시간 반영 완료 (" + DateTime.Now.ToString("HH:mm:ss") + ")";
-            };
-
-            string activeThemeFile = "themes/" + GetIni("Theme", "ActiveTheme", "default_dark.ini");
-            string[][] tabs = new string[][] {
-                new string[] { "단축명령 (aliases.txt)", "aliases.txt" },
-                new string[] { "유저스크립트 (user_script.txt)", "scripts/user_script.txt" },
-                new string[] { "현재 테마 (" + activeThemeFile + ")", activeThemeFile },
-                new string[] { "환경설정 (settings.ini)", "settings.ini" },
-                new string[] { "서버모듈 샘플 (sample_CCC.txt)", "modules/sample_CCC.txt" }
-            };
-
-            foreach (string[] t in tabs)
-            {
-                string label = t[0];
-                string rel = t[1];
-                Button tb = new Button
-                {
-                    Text = label,
-                    AutoSize = true,
-                    Height = 26,
-                    FlatStyle = FlatStyle.Flat,
-                    BackColor = this.ColBgSidebar,
-                    ForeColor = this.ColTextPrimary
-                };
-                tb.Click += delegate { loadFileIntoEditor(rel); };
-                tabBar.Controls.Add(tb);
-            }
-
-            btnSave.Click += delegate { saveCurrentFile(); };
-            editor.KeyDown += delegate (object s, KeyEventArgs e)
-            {
-                if (e.Control && e.KeyCode == Keys.S)
-                {
-                    e.SuppressKeyPress = true;
-                    saveCurrentFile();
-                }
-            };
-
-            dlg.Controls.Add(editor);
-            dlg.Controls.Add(bottomBar);
-            dlg.Controls.Add(tabBar);
-
-            loadFileIntoEditor(initialTab);
-            dlg.ShowDialog(this);
+            return string.Format("#{0:X2}{1:X2}{2:X2}", c.R, c.G, c.B);
         }
 
-        // ====================================================================
-        // Sound Settings Dialog (Zero Bundled Media - Plays User's sounds/*.wav)
-        // ====================================================================
+        public void OpenThemePaletteDialog()
+        {
+            OpenIntegratedSettingsDialog(2, "aliases.txt");
+        }
+
         public void OpenSoundSettingsDialog()
+        {
+            OpenIntegratedSettingsDialog(4, "aliases.txt");
+        }
+
+        public void OpenScriptEditorDialog(string initialTab)
+        {
+            OpenIntegratedSettingsDialog(5, string.IsNullOrEmpty(initialTab) ? "aliases.txt" : initialTab);
+        }
+
+        public void OpenModulesManagerDialog()
+        {
+            OpenIntegratedSettingsDialog(6, "aliases.txt");
+        }
+
+        public void OpenIntegratedSettingsDialog(int initialPageIndex)
+        {
+            OpenIntegratedSettingsDialog(initialPageIndex, "aliases.txt");
+        }
+
+        public void OpenIntegratedSettingsDialog(int initialPageIndex, string initialScriptFile)
         {
             using (Form dlg = new Form())
             {
-                dlg.Text = "사용자 효과음 연결 설정 (sounds/ 폴더)";
-                dlg.Size = new Size(500, 360);
+                dlg.Size = new Size(840, 580);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
+                dlg.MaximizeBox = false;
+                dlg.MinimizeBox = false;
                 dlg.BackColor = this.ColBgWindow;
                 dlg.ForeColor = this.ColTextPrimary;
+                ApplyWindowTitleBarTheme(dlg);
 
-                Label lblNotice = new Label
+                int activePageIdx = Math.Max(0, Math.Min(6, initialPageIndex));
+                bool advExpanded = (activePageIdx >= 1);
+
+                // ------------------------------------------------------------
+                // Left Sidebar Navigation Panel
+                // ------------------------------------------------------------
+                Panel leftNavPanel = new Panel
                 {
-                    Text = "[안내] 기본 배포판에는 소리/영상 파일이 포함되지 않습니다.\r\n원하시는 .wav 효과음 파일을 sounds/ 폴더에 넣으신 후 상황별로 연결하세요.",
-                    Location = new Point(16, 14),
-                    Size = new Size(450, 38),
+                    Dock = DockStyle.Left,
+                    Width = 204,
+                    BackColor = this.ColBgSidebar
+                };
+                Panel navRightBorder = new Panel
+                {
+                    Dock = DockStyle.Right,
+                    Width = 1,
+                    BackColor = this.ColBorder
+                };
+                leftNavPanel.Controls.Add(navRightBorder);
+
+                Label lblNavHeader = new Label
+                {
+                    Location = new Point(14, 14),
+                    Size = new Size(176, 20),
+                    Font = new Font("맑은 고딕", 9.5f, FontStyle.Bold),
                     ForeColor = this.ColTextSecondary
                 };
 
-                Button btnOpenSounds = new Button
+                Button btnNavQuick = new Button
                 {
-                    Text = "sounds/ 폴더 열기",
-                    Location = new Point(16, 56),
-                    Size = new Size(150, 26),
+                    Location = new Point(10, 42),
+                    Size = new Size(182, 38),
                     FlatStyle = FlatStyle.Flat,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Padding = new Padding(10, 0, 0, 0),
+                    Font = new Font("맑은 고딕", 9.5f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnNavQuick.FlatAppearance.BorderSize = 1;
+
+                Button btnNavAdvToggle = new Button
+                {
+                    Location = new Point(10, 86),
+                    Size = new Size(182, 36),
+                    FlatStyle = FlatStyle.Flat,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Padding = new Padding(10, 0, 0, 0),
+                    Font = new Font("맑은 고딕", 9.2f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnNavAdvToggle.FlatAppearance.BorderSize = 1;
+
+                Panel pnlAdvNavList = new Panel
+                {
+                    Location = new Point(10, 128),
+                    Size = new Size(182, 240),
                     BackColor = this.ColBgSidebar,
-                    ForeColor = this.ColTextPrimary
+                    Visible = advExpanded
                 };
-                btnOpenSounds.Click += delegate { OpenSubFolder("sounds"); };
 
-                CheckBox chkEnable = new CheckBox
+                Button[] advBtns = new Button[6];
+                for (int i = 0; i < 6; i++)
                 {
-                    Text = "효과음 재생 활성화",
-                    Checked = GetIni("Sounds", "EnableSounds", "true").ToLower() != "false",
-                    Location = new Point(185, 59),
-                    AutoSize = true
-                };
-
-                CheckBox chkBeep = new CheckBox
-                {
-                    Text = "파일 미지정 시 닉네임 호출에 윈도우 기본 알림음 사용",
-                    Checked = GetIni("Sounds", "UseSystemBeepFallback", "false").ToLower() == "true",
-                    Location = new Point(16, 245),
-                    AutoSize = true,
-                    ForeColor = this.ColTextSecondary
-                };
-
-                string[] soundFiles = GetUserSoundFiles();
-                string[][] rows = new string[][] {
-                    new string[] { "내 닉네임 호출(멘션):", "SoundMention" },
-                    new string[] { "일반 메시지 수신:", "SoundMessage" },
-                    new string[] { "채널 입/퇴장 알림:", "SoundJoin" },
-                    new string[] { "시스템 경고 알림:", "SoundAlert" }
-                };
-
-                ComboBox[] combos = new ComboBox[rows.Length];
-                for (int i = 0; i < rows.Length; i++)
-                {
-                    int y = 98 + i * 34;
-                    Label l = new Label { Text = rows[i][0], Location = new Point(16, y + 4), Width = 155 };
-                    ComboBox cb = new ComboBox
+                    Button b = new Button
                     {
-                        DropDownStyle = ComboBoxStyle.DropDownList,
-                        Location = new Point(175, y),
-                        Width = 215,
-                        BackColor = this.ColBgInput,
-                        ForeColor = this.ColTextPrimary
-                    };
-                    cb.Items.Add("(사용 안 함)");
-                    string saved = GetIni("Sounds", rows[i][1], "");
-                    cb.SelectedIndex = 0;
-                    foreach (string sf in soundFiles)
-                    {
-                        int idx = cb.Items.Add(sf);
-                        if (string.Equals(sf, saved, StringComparison.OrdinalIgnoreCase)) cb.SelectedIndex = idx;
-                    }
-                    combos[i] = cb;
-
-                    Button btnTest = new Button
-                    {
-                        Text = "▶ 테스트",
-                        Location = new Point(398, y - 1),
-                        Size = new Size(70, 25),
+                        Location = new Point(0, i * 38),
+                        Size = new Size(182, 34),
                         FlatStyle = FlatStyle.Flat,
-                        BackColor = this.ColBgSidebar,
-                        ForeColor = this.ColTextPrimary
+                        TextAlign = ContentAlignment.MiddleLeft,
+                        Padding = new Padding(12, 0, 0, 0),
+                        Font = new Font("맑은 고딕", 8.8f, FontStyle.Regular),
+                        Cursor = Cursors.Hand
                     };
-                    ComboBox capturedCb = cb;
-                    btnTest.Click += delegate
-                    {
-                        if (capturedCb.SelectedIndex > 0) PlaySoundFileName(Convert.ToString(capturedCb.SelectedItem));
-                        else SystemSounds.Asterisk.Play();
-                    };
-
-                    dlg.Controls.AddRange(new Control[] { l, cb, btnTest });
+                    b.FlatAppearance.BorderSize = 1;
+                    advBtns[i] = b;
+                    pnlAdvNavList.Controls.Add(b);
                 }
 
-                Button btnSave = new Button
+                leftNavPanel.Controls.AddRange(new Control[] { lblNavHeader, btnNavQuick, btnNavAdvToggle, pnlAdvNavList });
+
+                // ------------------------------------------------------------
+                // Bottom Action Bar (Save & Apply / Close)
+                // ------------------------------------------------------------
+                Panel bottomBar = new Panel
                 {
-                    Text = "효과음 설정 저장 (settings.ini)",
-                    Location = new Point(16, 276),
-                    Size = new Size(452, 34),
+                    Dock = DockStyle.Bottom,
+                    Height = 52,
+                    BackColor = this.ColBgToolbar
+                };
+                Panel bottomTopBorder = new Panel
+                {
+                    Dock = DockStyle.Top,
+                    Height = 1,
+                    BackColor = this.ColBorder
+                };
+                bottomBar.Controls.Add(bottomTopBorder);
+
+                Label lblFooterHint = new Label
+                {
+                    Location = new Point(14, 10),
+                    Size = new Size(472, 32),
+                    AutoSize = false,
+                    AutoEllipsis = true,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Font = new Font("맑은 고딕", 8.6f),
+                    ForeColor = this.ColTextSecondary
+                };
+
+                Button btnSaveAll = new Button
+                {
+                    Location = new Point(496, 9),
+                    Size = new Size(204, 34),
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColAccent,
                     ForeColor = Color.White,
-                    Font = new Font("맑은 고딕", 9.5f, FontStyle.Bold)
+                    Font = new Font("맑은 고딕", 9.2f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
                 };
-                btnSave.Click += delegate
+                btnSaveAll.FlatAppearance.BorderSize = 0;
+
+                Button btnCloseDlg = new Button
                 {
-                    SetIniValue("Sounds", "EnableSounds", chkEnable.Checked ? "true" : "false", false);
-                    SetIniValue("Sounds", "UseSystemBeepFallback", chkBeep.Checked ? "true" : "false", false);
-                    for (int i = 0; i < rows.Length; i++)
-                    {
-                        string val = combos[i].SelectedIndex > 0 ? Convert.ToString(combos[i].SelectedItem) : "";
-                        SetIniValue("Sounds", rows[i][1], val, i == rows.Length - 1);
-                    }
-                    dlg.Close();
+                    Location = new Point(708, 9),
+                    Size = new Size(102, 34),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgHeader,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f),
+                    Cursor = Cursors.Hand
+                };
+                btnCloseDlg.FlatAppearance.BorderColor = this.ColBorder;
+                btnCloseDlg.Click += delegate { dlg.Close(); };
+
+                bottomBar.Controls.AddRange(new Control[] { lblFooterHint, btnSaveAll, btnCloseDlg });
+
+                // ------------------------------------------------------------
+                // Right Content Pages Host (Page 0 = Quick, Pages 1..6 = Advanced)
+                // ------------------------------------------------------------
+                Panel contentHost = new Panel
+                {
+                    Dock = DockStyle.Fill,
+                    BackColor = this.ColBgWindow
                 };
 
-                dlg.Controls.AddRange(new Control[] { lblNotice, btnOpenSounds, chkEnable, chkBeep, btnSave });
+                Panel[] pages = new Panel[7];
+                for (int i = 0; i < 7; i++)
+                {
+                    Panel p = new Panel
+                    {
+                        Dock = DockStyle.Fill,
+                        BackColor = this.ColBgWindow,
+                        ForeColor = this.ColTextPrimary,
+                        Visible = (i == activePageIdx)
+                    };
+                    pages[i] = p;
+                    contentHost.Controls.Add(p);
+                }
+
+                Action updateNavVisuals = delegate
+                {
+                    pnlAdvNavList.Visible = advExpanded;
+                    btnNavAdvToggle.Text = advExpanded
+                        ? Tr("⚙ 고급 설정 (전체 옵션) ▾", "⚙ Advanced Settings ▾")
+                        : Tr("⚙ 고급 설정 (전체 옵션) ▸", "⚙ Advanced Settings ▸");
+
+                    bool isQuick = (activePageIdx == 0);
+                    btnNavQuick.BackColor = isQuick ? this.ColAccent : this.ColBgHeader;
+                    btnNavQuick.ForeColor = isQuick ? Color.White : this.ColTextPrimary;
+                    btnNavQuick.FlatAppearance.BorderColor = isQuick ? this.ColAccent : this.ColBorder;
+
+                    bool isAdvActive = (activePageIdx >= 1);
+                    btnNavAdvToggle.BackColor = isAdvActive ? this.ColBgWindow : this.ColBgHeader;
+                    btnNavAdvToggle.ForeColor = isAdvActive ? this.ColTextSystem : this.ColTextPrimary;
+                    btnNavAdvToggle.FlatAppearance.BorderColor = isAdvActive ? this.ColAccent : this.ColBorder;
+
+                    for (int i = 0; i < 6; i++)
+                    {
+                        bool sel = (activePageIdx == i + 1);
+                        advBtns[i].BackColor = sel ? this.ColAccent : this.ColBgSidebar;
+                        advBtns[i].ForeColor = sel ? Color.White : this.ColTextPrimary;
+                        advBtns[i].FlatAppearance.BorderColor = sel ? this.ColAccent : this.ColBorder;
+                        advBtns[i].Font = new Font("맑은 고딕", 8.8f, sel ? FontStyle.Bold : FontStyle.Regular);
+                    }
+                };
+
+                Action<int> switchPage = delegate (int pageIdx)
+                {
+                    activePageIdx = Math.Max(0, Math.Min(6, pageIdx));
+                    if (activePageIdx >= 1) advExpanded = true;
+                    for (int i = 0; i < 7; i++)
+                    {
+                        pages[i].Visible = (i == activePageIdx);
+                    }
+                    updateNavVisuals();
+                };
+
+                btnNavQuick.Click += delegate
+                {
+                    advExpanded = false;
+                    switchPage(0);
+                };
+
+                btnNavAdvToggle.Click += delegate
+                {
+                    if (!advExpanded)
+                    {
+                        advExpanded = true;
+                        if (activePageIdx == 0) switchPage(1);
+                        else updateNavVisuals();
+                    }
+                    else
+                    {
+                        if (activePageIdx >= 1)
+                        {
+                            advExpanded = false;
+                            switchPage(0);
+                        }
+                        else
+                        {
+                            advExpanded = false;
+                            updateNavVisuals();
+                        }
+                    }
+                };
+
+                for (int i = 0; i < 6; i++)
+                {
+                    int targetPage = i + 1;
+                    advBtns[i].Click += delegate { switchPage(targetPage); };
+                }
+
+                // ============================================================
+                // PAGE 0: ★ 간편 설정 (Quick Settings — Default View)
+                // ============================================================
+                Panel pageQuick = pages[0];
+
+                Label lblQuickIntro = new Label
+                {
+                    Location = new Point(16, 12),
+                    Size = new Size(584, 22),
+                    AutoSize = false,
+                    AutoEllipsis = true,
+                    Font = new Font("맑은 고딕", 9.5f, FontStyle.Bold),
+                    ForeColor = this.ColTextSystem
+                };
+
+                GroupBox grpQuickBasic = new GroupBox
+                {
+                    Location = new Point(16, 38),
+                    Size = new Size(584, 108),
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+
+                Label lLang = new Label { Location = new Point(14, 30), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                ThemedComboBox cbLang = new ThemedComboBox
+                {
+                    DropDownStyle = ComboBoxStyle.DropDownList,
+                    Location = new Point(108, 26),
+                    Width = 172,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+                cbLang.Items.Add("한국어 (Korean)");
+                cbLang.Items.Add("English (영어)");
+                cbLang.SelectedIndex = this.IsEnglish ? 1 : 0;
+
+                Label lNick = new Label { Location = new Point(296, 30), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                TextBox txtNick = new TextBox
+                {
+                    Text = !string.IsNullOrEmpty(this.GlobalNickname) ? this.GlobalNickname : GetIni("User", "DefaultNickname", "네무로"),
+                    Location = new Point(386, 26),
+                    Width = 182,
+                    MaxLength = 16,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9.2f)
+                };
+
+                CheckBox chkApplyNickLive = new CheckBox
+                {
+                    Checked = true,
+                    Location = new Point(16, 68),
+                    AutoSize = true,
+                    Font = new Font("맑은 고딕", 8.8f),
+                    ForeColor = this.ColTextSecondary
+                };
+
+                CheckBox chkAutoConnect = new CheckBox
+                {
+                    Checked = GetIni("Server", "AutoConnect", "true").ToLower() == "true",
+                    Location = new Point(310, 68),
+                    AutoSize = true,
+                    Font = new Font("맑은 고딕", 8.8f),
+                    ForeColor = this.ColTextSecondary
+                };
+
+                grpQuickBasic.Controls.AddRange(new Control[] {
+                    lLang, cbLang, lNick, txtNick, chkApplyNickLive, chkAutoConnect
+                });
+
+                GroupBox grpQuickAppearance = new GroupBox
+                {
+                    Location = new Point(16, 156),
+                    Size = new Size(584, 114),
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+
+                Label lActiveTheme = new Label { Location = new Point(14, 30), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                ThemedComboBox cbActiveTheme = new ThemedComboBox
+                {
+                    DropDownStyle = ComboBoxStyle.DropDownList,
+                    Location = new Point(108, 26),
+                    Width = 182,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f)
+                };
+                Action populateThemeCombo = delegate
+                {
+                    string curThemeFile = GetIni("Theme", "ActiveTheme", "default_dark.ini");
+                    cbActiveTheme.Items.Clear();
+                    string tDir = Path.Combine(this.BaseDir, "themes");
+                    if (Directory.Exists(tDir))
+                    {
+                        foreach (string f in Directory.GetFiles(tDir, "*.ini"))
+                        {
+                            string fn = Path.GetFileName(f);
+                            int idx = cbActiveTheme.Items.Add(fn);
+                            if (string.Equals(fn, curThemeFile, StringComparison.OrdinalIgnoreCase)) cbActiveTheme.SelectedIndex = idx;
+                        }
+                    }
+                    if (cbActiveTheme.SelectedIndex < 0 && cbActiveTheme.Items.Count > 0) cbActiveTheme.SelectedIndex = 0;
+                };
+                populateThemeCombo();
+
+                Button btnGoColorPalette = new Button
+                {
+                    Location = new Point(302, 25),
+                    Size = new Size(266, 27),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColAccent,
+                    ForeColor = Color.White,
+                    Font = new Font("맑은 고딕", 8.6f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnGoColorPalette.FlatAppearance.BorderSize = 0;
+                btnGoColorPalette.Click += delegate { switchPage(2); };
+
+                Label lFName = new Label { Location = new Point(14, 70), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                ThemedComboBox cbFName = new ThemedComboBox
+                {
+                    DropDownStyle = ComboBoxStyle.DropDownList,
+                    Location = new Point(66, 66),
+                    Width = 158,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f)
+                };
+                string[] prefFonts = new string[] { "맑은 고딕", "굴림", "굴림체", "돋움", "돋움체", "바탕", "나눔고딕", "D2Coding", "Consolas", "Segoe UI", "Tahoma" };
+                HashSet<string> seenFonts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string pf in prefFonts) { cbFName.Items.Add(pf); seenFonts.Add(pf); }
+                try
+                {
+                    using (InstalledFontCollection ifc = new InstalledFontCollection())
+                    {
+                        foreach (FontFamily ff in ifc.Families)
+                        {
+                            if (!seenFonts.Contains(ff.Name)) { cbFName.Items.Add(ff.Name); seenFonts.Add(ff.Name); }
+                        }
+                    }
+                }
+                catch { }
+                int fSel = cbFName.FindStringExact(this.CurrentFontName);
+                cbFName.SelectedIndex = fSel >= 0 ? fSel : 0;
+
+                Label lFSize = new Label { Location = new Point(234, 70), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                NumericUpDown numFSize = new NumericUpDown
+                {
+                    Minimum = 8,
+                    Maximum = 22,
+                    Value = Math.Max(8, Math.Min(22, (int)Math.Round(this.CurrentFontSize))),
+                    Location = new Point(282, 67),
+                    Width = 52,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f)
+                };
+
+                Label lFWeight = new Label { Location = new Point(344, 70), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                ThemedComboBox cbFWeight = new ThemedComboBox
+                {
+                    DropDownStyle = ComboBoxStyle.DropDownList,
+                    Location = new Point(398, 66),
+                    Width = 170,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.8f)
+                };
+                int initFWeightIdx = this.CurrentFontWeightMode == "bold" ? 1 : (this.CurrentFontWeightMode == "light" ? 2 : 0);
+
+                grpQuickAppearance.Controls.AddRange(new Control[] {
+                    lActiveTheme, cbActiveTheme, btnGoColorPalette,
+                    lFName, cbFName, lFSize, numFSize, lFWeight, cbFWeight
+                });
+
+                GroupBox grpQuickTools = new GroupBox
+                {
+                    Location = new Point(16, 280),
+                    Size = new Size(584, 134),
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+
+                CheckBox chkAlwaysOnTop = new CheckBox
+                {
+                    Checked = this.TopMost,
+                    Location = new Point(16, 28),
+                    AutoSize = true,
+                    Font = new Font("맑은 고딕", 8.8f)
+                };
+
+                CheckBox chkEnableSounds = new CheckBox
+                {
+                    Checked = GetIni("Sounds", "EnableSounds", "true").ToLower() != "false",
+                    Location = new Point(214, 28),
+                    AutoSize = true,
+                    Font = new Font("맑은 고딕", 8.8f)
+                };
+
+                CheckBox chkWarnExternalLinks = new CheckBox
+                {
+                    Checked = GetIni("Security", "SkipLinkWarning", "false").ToLowerInvariant() != "true",
+                    Location = new Point(362, 28),
+                    AutoSize = true,
+                    Font = new Font("맑은 고딕", 8.8f)
+                };
+
+                Button btnQuickBossHide = new Button
+                {
+                    Location = new Point(16, 60),
+                    Size = new Size(104, 32),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.6f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnQuickBossHide.FlatAppearance.BorderColor = this.ColBorder;
+                btnQuickBossHide.Click += delegate
+                {
+                    dlg.Close();
+                    ToggleWindowVisibility();
+                };
+
+                Button btnQuickOpenFolder = new Button
+                {
+                    Location = new Point(126, 60),
+                    Size = new Size(104, 32),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.6f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnQuickOpenFolder.FlatAppearance.BorderColor = this.ColBorder;
+                btnQuickOpenFolder.Click += delegate { OpenSubFolder(""); };
+
+                Button btnQuickScripts = new Button
+                {
+                    Location = new Point(236, 60),
+                    Size = new Size(112, 32),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.6f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnQuickScripts.FlatAppearance.BorderColor = this.ColBorder;
+                btnQuickScripts.Click += delegate { switchPage(5); };
+
+                Button btnQuickModules = new Button
+                {
+                    Location = new Point(354, 60),
+                    Size = new Size(106, 32),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextSystem,
+                    Font = new Font("맑은 고딕", 8.6f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnQuickModules.FlatAppearance.BorderColor = this.ColAccent;
+                btnQuickModules.Click += delegate { switchPage(6); };
+
+                Button btnQuickSounds = new Button
+                {
+                    Location = new Point(466, 60),
+                    Size = new Size(102, 32),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.6f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnQuickSounds.FlatAppearance.BorderColor = this.ColBorder;
+                btnQuickSounds.Click += delegate { switchPage(4); };
+
+                Label lblQuickHotkeys = new Label
+                {
+                    Location = new Point(16, 102),
+                    Size = new Size(552, 20),
+                    AutoSize = false,
+                    AutoEllipsis = true,
+                    Font = new Font("맑은 고딕", 8.4f),
+                    ForeColor = this.ColTextSecondary
+                };
+
+                grpQuickTools.Controls.AddRange(new Control[] {
+                    chkAlwaysOnTop, chkEnableSounds, chkWarnExternalLinks,
+                    btnQuickBossHide, btnQuickOpenFolder, btnQuickScripts, btnQuickModules, btnQuickSounds,
+                    lblQuickHotkeys
+                });
+
+                Button btnExpandAdvBottom = new Button
+                {
+                    Location = new Point(16, 424),
+                    Size = new Size(584, 36),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgHeader,
+                    ForeColor = this.ColTextSystem,
+                    Font = new Font("맑은 고딕", 9.2f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnExpandAdvBottom.FlatAppearance.BorderColor = this.ColAccent;
+                btnExpandAdvBottom.Click += delegate
+                {
+                    advExpanded = true;
+                    switchPage(1);
+                };
+
+                pageQuick.Controls.AddRange(new Control[] {
+                    lblQuickIntro, grpQuickBasic, grpQuickAppearance, grpQuickTools, btnExpandAdvBottom
+                });
+
+                // ============================================================
+                // PAGE 1 (Advanced 1): 서버 · 프로필 상세 설정
+                // ============================================================
+                Panel pageAdvServer = pages[1];
+
+                GroupBox grpServerConn = new GroupBox
+                {
+                    Location = new Point(16, 10),
+                    Size = new Size(584, 134),
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+
+                Label lSrvUrl = new Label { Location = new Point(16, 24), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                TextBox txtSrvUrl = new TextBox
+                {
+                    Text = GetIni("Server", "Url", "https://nemulo.duckdns.org"),
+                    Location = new Point(172, 20),
+                    Width = 394,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9.2f)
+                };
+
+                Label lDefChan = new Label { Location = new Point(16, 54), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                TextBox txtDefChan = new TextBox
+                {
+                    Text = GetIni("Server", "DefaultChannel", "#자유대화"),
+                    Location = new Point(172, 50),
+                    Width = 210,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9.2f)
+                };
+
+                Label lExtraSrvs = new Label { Location = new Point(16, 84), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                TextBox txtExtraSrvs = new TextBox
+                {
+                    Text = GetIni("Server", "AutoConnectServers", GetIni("Server", "ExtraServers", "")),
+                    Location = new Point(172, 80),
+                    Width = 394,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f)
+                };
+
+                Label lExtraHint = new Label
+                {
+                    Location = new Point(172, 108),
+                    Size = new Size(394, 20),
+                    AutoSize = false,
+                    Font = new Font("맑은 고딕", 8.2f),
+                    ForeColor = this.ColTextSecondary
+                };
+
+                grpServerConn.Controls.AddRange(new Control[] {
+                    lSrvUrl, txtSrvUrl, lDefChan, txtDefChan, lExtraSrvs, txtExtraSrvs, lExtraHint
+                });
+
+                GroupBox grpAutoJoin = new GroupBox
+                {
+                    Location = new Point(16, 150),
+                    Size = new Size(584, 160),
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+
+                Label lblAutoJoinTitle = new Label
+                {
+                    Location = new Point(16, 20),
+                    Size = new Size(550, 18),
+                    Font = new Font("맑은 고딕", 8.8f),
+                    ForeColor = this.ColTextSecondary
+                };
+
+                TextBox txtAutoJoinRules = new TextBox
+                {
+                    Location = new Point(16, 40),
+                    Size = new Size(550, 90),
+                    Multiline = true,
+                    ScrollBars = ScrollBars.Vertical,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("Consolas", 9.2f)
+                };
+
+                StringBuilder sbAjInit = new StringBuilder();
+                if (this.IniData != null && this.IniData.ContainsKey("AutoJoin"))
+                {
+                    foreach (KeyValuePair<string, string> kvp in this.IniData["AutoJoin"])
+                    {
+                        sbAjInit.AppendFormat("{0} = {1}\r\n", kvp.Key, kvp.Value);
+                    }
+                }
+                if (sbAjInit.Length == 0)
+                {
+                    sbAjInit.AppendLine("tnemu.duckdns.org = #자유채널, #바보, #천천히");
+                    sbAjInit.AppendLine("nemulo.duckdns.org = #자유채널, #바보");
+                }
+                txtAutoJoinRules.Text = sbAjInit.ToString().TrimEnd();
+
+                Label lblAutoJoinHint = new Label
+                {
+                    Location = new Point(16, 134),
+                    Size = new Size(550, 20),
+                    Font = new Font("맑은 고딕", 8.2f),
+                    ForeColor = this.ColTextSystem
+                };
+
+                grpAutoJoin.Controls.AddRange(new Control[] {
+                    lblAutoJoinTitle, txtAutoJoinRules, lblAutoJoinHint
+                });
+
+                GroupBox grpProfileAdv = new GroupBox
+                {
+                    Location = new Point(16, 318),
+                    Size = new Size(584, 138),
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+
+                Label lQuitMsg = new Label { Location = new Point(16, 30), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                TextBox txtQuitMsg = new TextBox
+                {
+                    Text = GetIni("User", "QuitMessage", "NyaaChat Native - 좋은 하루 되세요!"),
+                    Location = new Point(172, 26),
+                    Width = 394,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f)
+                };
+
+                Label lUserId = new Label { Location = new Point(16, 72), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                TextBox txtUserId = new TextBox
+                {
+                    Text = this.GlobalUserId,
+                    ReadOnly = true,
+                    Location = new Point(172, 68),
+                    Width = 220,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextSecondary,
+                    Font = new Font("Consolas", 9.5f)
+                };
+                Button btnRegenUserId = new Button
+                {
+                    Location = new Point(402, 66),
+                    Size = new Size(164, 27),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.6f),
+                    Cursor = Cursors.Hand
+                };
+                btnRegenUserId.FlatAppearance.BorderColor = this.ColBorder;
+                btnRegenUserId.Click += delegate
+                {
+                    this.GlobalUserId = "u_" + Guid.NewGuid().ToString("N").Substring(0, 9);
+                    txtUserId.Text = this.GlobalUserId;
+                    SetIniValue("User", "UserId", this.GlobalUserId, true);
+                };
+
+                grpProfileAdv.Controls.AddRange(new Control[] {
+                    lQuitMsg, txtQuitMsg, lUserId, txtUserId, btnRegenUserId
+                });
+
+                pageAdvServer.Controls.AddRange(new Control[] { grpServerConn, grpAutoJoin, grpProfileAdv });
+
+                // ============================================================
+                // PAGE 2 (Advanced 2): 색상 팔레트 · 글꼴 상세 커스터마이징
+                // ============================================================
+                Panel pageAdvColors = pages[2];
+
+                GroupBox grpColors = new GroupBox
+                {
+                    Location = new Point(16, 14),
+                    Size = new Size(584, 446),
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+
+                string[][] colorSlots = new string[][] {
+                    new string[] { "BgTitleBar",    "최상단 윈도우 타이틀바 배경", "Window Title Bar Bg" },
+                    new string[] { "TextTitleBar",  "최상단 윈도우 타이틀바 글자", "Window Title Bar Text" },
+                    new string[] { "BgToolbar",     "상단 메뉴바 배경",           "Top Toolbar Bg" },
+                    new string[] { "BgHeader",      "채널 토픽/헤더바 배경",       "Channel Header Bg" },
+                    new string[] { "BgChat",        "채팅창 메인 배경",           "Main Chat Area Bg" },
+                    new string[] { "BgSidebar",     "좌/우 사이드바 배경",        "Left/Right Sidebar Bg" },
+                    new string[] { "BgInput",       "하단 채팅 입력창 배경",       "Bottom Input Box Bg" },
+                    new string[] { "BgWindow",      "외곽 창 배경",               "Outer Window Bg" },
+                    new string[] { "BorderColor",   "구분선 / 테두리 색",         "Splitter / Border Color" },
+                    new string[] { "AccentPrimary", "강조 버튼 / 포인트 색",      "Primary Accent Color" },
+                    new string[] { "TextPrimary",   "채팅 기본 글자색",           "Primary Chat Text" },
+                    new string[] { "TextSecondary", "토픽 / 보조 글자색",         "Secondary / Topic Text" },
+                    new string[] { "TextSystem",    "시스템 공지 글자색",         "System Notice Text" },
+                    new string[] { "TextSelfNick",  "내 닉네임 글자색",           "My Nickname Color" },
+                    new string[] { "TextOtherNick", "상대방 닉네임 글자색",       "Other User Nickname" },
+                    new string[] { "TextOpBadge",   "방장(@) 배지 색상",          "ChanOp (@) Badge Color" }
+                };
+
+                Func<int, string> getSlotDisplayLabel = delegate (int idx)
+                {
+                    if (idx < 0 || idx >= colorSlots.Length) return "";
+                    return this.IsEnglish ? colorSlots[idx][2] : colorSlots[idx][1];
+                };
+
+                Func<string, Color> getSlotColor = delegate (string key)
+                {
+                    switch (key)
+                    {
+                        case "BgTitleBar": return this.ColBgTitleBar;
+                        case "TextTitleBar": return this.ColTextTitleBar;
+                        case "BgToolbar": return this.ColBgToolbar;
+                        case "BgHeader": return this.ColBgHeader;
+                        case "BgChat": return this.ColBgChat;
+                        case "BgSidebar": return this.ColBgSidebar;
+                        case "BgInput": return this.ColBgInput;
+                        case "BgWindow": return this.ColBgWindow;
+                        case "BorderColor": return this.ColBorder;
+                        case "AccentPrimary": return this.ColAccent;
+                        case "TextPrimary": return this.ColTextPrimary;
+                        case "TextSecondary": return this.ColTextSecondary;
+                        case "TextSystem": return this.ColTextSystem;
+                        case "TextSelfNick": return this.ColTextSelfNick;
+                        case "TextOtherNick": return this.ColTextOtherNick;
+                        case "TextOpBadge": return this.ColTextOpBadge;
+                        default: return this.ColBgChat;
+                    }
+                };
+
+                Action<string, Color> setSlotColor = delegate (string key, Color c)
+                {
+                    switch (key)
+                    {
+                        case "BgTitleBar": this.ColBgTitleBar = c; break;
+                        case "TextTitleBar": this.ColTextTitleBar = c; break;
+                        case "BgToolbar": this.ColBgToolbar = c; break;
+                        case "BgHeader": this.ColBgHeader = c; break;
+                        case "BgChat": this.ColBgChat = c; break;
+                        case "BgSidebar": this.ColBgSidebar = c; break;
+                        case "BgInput": this.ColBgInput = c; break;
+                        case "BgWindow": this.ColBgWindow = c; break;
+                        case "BorderColor": this.ColBorder = c; break;
+                        case "AccentPrimary": this.ColAccent = c; break;
+                        case "TextPrimary": this.ColTextPrimary = c; break;
+                        case "TextSecondary": this.ColTextSecondary = c; break;
+                        case "TextSystem": this.ColTextSystem = c; break;
+                        case "TextSelfNick": this.ColTextSelfNick = c; break;
+                        case "TextOtherNick": this.ColTextOtherNick = c; break;
+                        case "TextOpBadge": this.ColTextOpBadge = c; break;
+                    }
+                };
+
+                ListBox lbSlots = new ListBox
+                {
+                    Location = new Point(14, 28),
+                    Size = new Size(242, 356),
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.8f),
+                    IntegralHeight = false,
+                    ItemHeight = 20
+                };
+
+                Action refreshSlotListLabels = delegate
+                {
+                    int sel = lbSlots.SelectedIndex;
+                    lbSlots.BeginUpdate();
+                    lbSlots.Items.Clear();
+                    for (int i = 0; i < colorSlots.Length; i++)
+                    {
+                        Color c = getSlotColor(colorSlots[i][0]);
+                        lbSlots.Items.Add(string.Format("[{0}] {1}", ColorToHex(c), getSlotDisplayLabel(i)));
+                    }
+                    lbSlots.EndUpdate();
+                    if (sel >= 0 && sel < lbSlots.Items.Count) lbSlots.SelectedIndex = sel;
+                    else if (lbSlots.Items.Count > 0) lbSlots.SelectedIndex = 0;
+                };
+
+                Label lblSelectedSlot = new Label
+                {
+                    Location = new Point(268, 26),
+                    Size = new Size(302, 20),
+                    AutoSize = false,
+                    AutoEllipsis = true,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold),
+                    ForeColor = this.ColTextSystem
+                };
+
+                Panel pnlCurrentColorBox = new Panel
+                {
+                    Location = new Point(268, 50),
+                    Size = new Size(44, 28),
+                    BorderStyle = BorderStyle.FixedSingle
+                };
+
+                TextBox txtHexCode = new TextBox
+                {
+                    Location = new Point(318, 52),
+                    Width = 76,
+                    Font = new Font("Consolas", 10f, FontStyle.Bold),
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary
+                };
+
+                Button btnApplyHex = new Button
+                {
+                    Location = new Point(400, 50),
+                    Size = new Size(72, 28),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.4f),
+                    Cursor = Cursors.Hand
+                };
+                btnApplyHex.FlatAppearance.BorderColor = this.ColBorder;
+
+                Button btnOpenColorDialog = new Button
+                {
+                    Location = new Point(478, 50),
+                    Size = new Size(92, 28),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColAccent,
+                    ForeColor = Color.White,
+                    Font = new Font("맑은 고딕", 8.4f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnOpenColorDialog.FlatAppearance.BorderSize = 0;
+
+                Label lblPaletteGridGuide = new Label
+                {
+                    Location = new Point(268, 86),
+                    Size = new Size(302, 18),
+                    AutoSize = false,
+                    AutoEllipsis = true,
+                    Font = new Font("맑은 고딕", 8.4f),
+                    ForeColor = this.ColTextSecondary
+                };
+
+                string[] paletteHexes = new string[] {
+                    "#0B1120", "#0F172A", "#162033", "#1E293B", "#111827", "#18181B", "#27272A", "#000000",
+                    "#06281E", "#1E1B4B", "#2E1065", "#31102F", "#1C1917", "#334155", "#E2E8F0", "#FFFFFF",
+                    "#4F46E5", "#2563EB", "#0284C7", "#059669", "#D97706", "#E11D48", "#7C3AED", "#0D9488",
+                    "#F8FAFC", "#38BDF8", "#60A5FA", "#34D399", "#FBBF24", "#F472B6", "#A78BFA", "#94A3B8"
+                };
+
+                Panel pnlSwatchGrid = new Panel
+                {
+                    Location = new Point(268, 108),
+                    Size = new Size(302, 140)
+                };
+
+                Panel pnlMiniPreviewHeader = new Panel
+                {
+                    Location = new Point(268, 254),
+                    Size = new Size(302, 24),
+                    BackColor = this.ColBgHeader,
+                    BorderStyle = BorderStyle.FixedSingle
+                };
+                Label lblMiniHeader = new Label
+                {
+                    Location = new Point(6, 4),
+                    AutoSize = true,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.4f, FontStyle.Bold)
+                };
+                pnlMiniPreviewHeader.Controls.Add(lblMiniHeader);
+
+                Panel pnlMiniPreviewChat = new Panel
+                {
+                    Location = new Point(268, 278),
+                    Size = new Size(302, 42),
+                    BackColor = this.ColBgChat,
+                    BorderStyle = BorderStyle.FixedSingle
+                };
+                Label lblMiniChatSample = new Label
+                {
+                    Location = new Point(6, 10),
+                    Size = new Size(288, 24),
+                    AutoSize = false,
+                    AutoEllipsis = true,
+                    ForeColor = this.ColTextPrimary,
+                    Font = this.ChatFont
+                };
+                pnlMiniPreviewChat.Controls.Add(lblMiniChatSample);
+
+                Button btnWinFontDlg = new Button
+                {
+                    Location = new Point(268, 328),
+                    Size = new Size(302, 28),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.6f),
+                    Cursor = Cursors.Hand
+                };
+                btnWinFontDlg.FlatAppearance.BorderColor = this.ColBorder;
+
+                Button btnSaveAsNew = new Button
+                {
+                    Location = new Point(14, 396),
+                    Size = new Size(556, 36),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnSaveAsNew.FlatAppearance.BorderColor = this.ColAccent;
+
+                grpColors.Controls.AddRange(new Control[] {
+                    lbSlots, lblSelectedSlot, pnlCurrentColorBox, txtHexCode,
+                    btnApplyHex, btnOpenColorDialog, lblPaletteGridGuide, pnlSwatchGrid,
+                    pnlMiniPreviewHeader, pnlMiniPreviewChat, btnWinFontDlg, btnSaveAsNew
+                });
+
+                pageAdvColors.Controls.Add(grpColors);
+
+                // ============================================================
+                // PAGE 3 (Advanced 3): 창 · 레이아웃 · 숨김(보스키)
+                // ============================================================
+                Panel pageAdvWin = pages[3];
+
+                GroupBox grpWinBehavior = new GroupBox
+                {
+                    Location = new Point(16, 14),
+                    Size = new Size(584, 206),
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+
+                Label lWinTitle = new Label { Location = new Point(16, 32), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                TextBox txtWinTitle = new TextBox
+                {
+                    Text = GetIni("Window", "Title", "Nyaa Chat Native Multi-Server Client"),
+                    Location = new Point(172, 28),
+                    Width = 394,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9.2f)
+                };
+
+                CheckBox chkMinToTray = new CheckBox
+                {
+                    Checked = GetIni("Window", "MinimizeToTrayOnClose", "false").ToLower() == "true",
+                    Location = new Point(16, 68),
+                    AutoSize = true,
+                    Font = new Font("맑은 고딕", 8.8f)
+                };
+
+                CheckBox chkShowTs = new CheckBox
+                {
+                    Checked = GetIni("Theme", "ShowTimestamps", "true").ToLower() != "false",
+                    Location = new Point(16, 98),
+                    AutoSize = true,
+                    Font = new Font("맑은 고딕", 8.8f)
+                };
+
+                Label lWinOpacity = new Label { Location = new Point(16, 134), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                NumericUpDown numWinOpacity = new NumericUpDown
+                {
+                    Minimum = 30,
+                    Maximum = 100,
+                    Increment = 5,
+                    Value = Math.Max(30, Math.Min(100, this.currentOpacityPct)),
+                    Location = new Point(172, 130),
+                    Width = 76,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f)
+                };
+
+                Button btnAdvBossHide = new Button
+                {
+                    Location = new Point(264, 128),
+                    Size = new Size(190, 28),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnAdvBossHide.FlatAppearance.BorderColor = this.ColBorder;
+                btnAdvBossHide.Click += delegate
+                {
+                    dlg.Close();
+                    ToggleWindowVisibility();
+                };
+
+                Label lBossKeyInfo = new Label
+                {
+                    Location = new Point(16, 168),
+                    Size = new Size(552, 22),
+                    AutoSize = false,
+                    AutoEllipsis = true,
+                    Font = new Font("맑은 고딕", 8.5f),
+                    ForeColor = this.ColTextSystem
+                };
+
+                grpWinBehavior.Controls.AddRange(new Control[] {
+                    lWinTitle, txtWinTitle, chkMinToTray, chkShowTs,
+                    lWinOpacity, numWinOpacity, btnAdvBossHide, lBossKeyInfo
+                });
+
+                GroupBox grpLayoutSplit = new GroupBox
+                {
+                    Location = new Point(16, 232),
+                    Size = new Size(584, 178),
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+
+                Label lLeftWidth = new Label { Location = new Point(16, 36), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                NumericUpDown numLeftWidth = new NumericUpDown
+                {
+                    Minimum = 200,
+                    Maximum = 380,
+                    Increment = 10,
+                    Value = Math.Max(200, Math.Min(380, ParseInt(GetIni("Window", "LeftPanelWidth", "240"), 240))),
+                    Location = new Point(260, 32),
+                    Width = 80,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f)
+                };
+
+                Label lRightWidth = new Label { Location = new Point(16, 76), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                NumericUpDown numRightWidth = new NumericUpDown
+                {
+                    Minimum = 170,
+                    Maximum = 340,
+                    Increment = 10,
+                    Value = Math.Max(170, Math.Min(340, ParseInt(GetIni("Window", "RightPanelWidth", "200"), 200))),
+                    Location = new Point(260, 72),
+                    Width = 80,
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f)
+                };
+
+                Button btnApplySplitNow = new Button
+                {
+                    Location = new Point(16, 120),
+                    Size = new Size(268, 34),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColAccent,
+                    ForeColor = Color.White,
+                    Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnApplySplitNow.FlatAppearance.BorderSize = 0;
+                btnApplySplitNow.Click += delegate
+                {
+                    SetIniValue("Window", "LeftPanelWidth", Convert.ToString((int)numLeftWidth.Value), false);
+                    SetIniValue("Window", "RightPanelWidth", Convert.ToString((int)numRightWidth.Value), true);
+                    ApplyDefaultSplitters();
+                };
+
+                Button btnResetSplitDef = new Button
+                {
+                    Location = new Point(298, 120),
+                    Size = new Size(268, 34),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.8f),
+                    Cursor = Cursors.Hand
+                };
+                btnResetSplitDef.FlatAppearance.BorderColor = this.ColBorder;
+                btnResetSplitDef.Click += delegate
+                {
+                    numLeftWidth.Value = 240;
+                    numRightWidth.Value = 200;
+                    SetIniValue("Window", "LeftPanelWidth", "240", false);
+                    SetIniValue("Window", "RightPanelWidth", "200", true);
+                    ApplyDefaultSplitters();
+                };
+
+                grpLayoutSplit.Controls.AddRange(new Control[] {
+                    lLeftWidth, numLeftWidth, lRightWidth, numRightWidth,
+                    btnApplySplitNow, btnResetSplitDef
+                });
+
+                pageAdvWin.Controls.AddRange(new Control[] { grpWinBehavior, grpLayoutSplit });
+
+                // ============================================================
+                // PAGE 4 (Advanced 4): 효과음 · 보안 · 대화로그
+                // ============================================================
+                Panel pageAdvSoundSec = pages[4];
+
+                GroupBox grpSounds = new GroupBox
+                {
+                    Location = new Point(16, 14),
+                    Size = new Size(584, 248),
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+
+                Label lblSoundNotice = new Label
+                {
+                    Location = new Point(16, 26),
+                    Size = new Size(412, 34),
+                    AutoSize = false,
+                    Font = new Font("맑은 고딕", 8.4f),
+                    ForeColor = this.ColTextSecondary
+                };
+
+                Button btnOpenSoundsDir = new Button
+                {
+                    Location = new Point(434, 26),
+                    Size = new Size(134, 28),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.5f),
+                    Cursor = Cursors.Hand
+                };
+                btnOpenSoundsDir.FlatAppearance.BorderColor = this.ColBorder;
+                btnOpenSoundsDir.Click += delegate { OpenSubFolder("sounds"); };
+
+                string[] wavFiles = GetUserSoundFiles();
+                string[] sndKeys = new string[] { "SoundMention", "SoundMessage", "SoundJoin", "SoundAlert" };
+                Label[] sndLabels = new Label[4];
+                ThemedComboBox[] sndCombos = new ThemedComboBox[4];
+                Button[] sndTestBtns = new Button[4];
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int yBase = 68 + i * 34;
+                    Label l = new Label
+                    {
+                        Location = new Point(16, yBase + 4),
+                        Size = new Size(150, 20),
+                        AutoSize = false,
+                        Font = new Font("맑은 고딕", 8.8f)
+                    };
+                    ThemedComboBox cb = new ThemedComboBox
+                    {
+                        DropDownStyle = ComboBoxStyle.DropDownList,
+                        Location = new Point(170, yBase),
+                        Width = 280,
+                        BackColor = this.ColBgInput,
+                        ForeColor = this.ColTextPrimary,
+                        Font = new Font("맑은 고딕", 8.8f)
+                    };
+                    cb.Items.Add(Tr("(사용 안 함)", "(Disabled)"));
+                    string savedWav = GetIni("Sounds", sndKeys[i], "");
+                    cb.SelectedIndex = 0;
+                    foreach (string wf in wavFiles)
+                    {
+                        int idx = cb.Items.Add(wf);
+                        if (string.Equals(wf, savedWav, StringComparison.OrdinalIgnoreCase)) cb.SelectedIndex = idx;
+                    }
+
+                    Button bTest = new Button
+                    {
+                        Location = new Point(458, yBase - 1),
+                        Size = new Size(110, 25),
+                        FlatStyle = FlatStyle.Flat,
+                        BackColor = this.ColBgSidebar,
+                        ForeColor = this.ColTextPrimary,
+                        Font = new Font("맑은 고딕", 8.4f),
+                        Cursor = Cursors.Hand
+                    };
+                    bTest.FlatAppearance.BorderColor = this.ColBorder;
+                    ThemedComboBox capCb = cb;
+                    bTest.Click += delegate
+                    {
+                        if (capCb.SelectedIndex > 0) PlaySoundFileName(Convert.ToString(capCb.SelectedItem));
+                        else SystemSounds.Asterisk.Play();
+                    };
+
+                    sndLabels[i] = l;
+                    sndCombos[i] = cb;
+                    sndTestBtns[i] = bTest;
+                    grpSounds.Controls.AddRange(new Control[] { l, cb, bTest });
+                }
+
+                CheckBox chkBeepFallback = new CheckBox
+                {
+                    Checked = GetIni("Sounds", "UseSystemBeepFallback", "false").ToLower() == "true",
+                    Location = new Point(16, 212),
+                    AutoSize = true,
+                    Font = new Font("맑은 고딕", 8.8f),
+                    ForeColor = this.ColTextSecondary
+                };
+
+                grpSounds.Controls.AddRange(new Control[] { lblSoundNotice, btnOpenSoundsDir, chkBeepFallback });
+
+                GroupBox grpSecLog = new GroupBox
+                {
+                    Location = new Point(16, 274),
+                    Size = new Size(584, 118),
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+
+                CheckBox chkSaveLogs = new CheckBox
+                {
+                    Checked = GetIni("Logging", "SaveLogs", "true").ToLowerInvariant() == "true",
+                    Location = new Point(16, 32),
+                    AutoSize = true,
+                    Font = new Font("맑은 고딕", 8.8f)
+                };
+
+                Button btnOpenLogsDir = new Button
+                {
+                    Location = new Point(16, 66),
+                    Size = new Size(220, 32),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.8f),
+                    Cursor = Cursors.Hand
+                };
+                btnOpenLogsDir.FlatAppearance.BorderColor = this.ColBorder;
+                btnOpenLogsDir.Click += delegate { OpenSubFolder("logs"); };
+
+                grpSecLog.Controls.AddRange(new Control[] { chkSaveLogs, btnOpenLogsDir });
+
+                pageAdvSoundSec.Controls.AddRange(new Control[] { grpSounds, grpSecLog });
+
+                // ============================================================
+                // PAGE 5 (Advanced 5): 스크립트 편집기 · 폴더 관리
+                // ============================================================
+                Panel pageAdvScripts = pages[5];
+
+                GroupBox grpFolders = new GroupBox
+                {
+                    Location = new Point(16, 14),
+                    Size = new Size(584, 72),
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+
+                Button btnDirRoot = new Button { Location = new Point(14, 28), Size = new Size(134, 30), FlatStyle = FlatStyle.Flat, BackColor = this.ColBgSidebar, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 8.5f), Cursor = Cursors.Hand };
+                Button btnDirThemes = new Button { Location = new Point(154, 28), Size = new Size(134, 30), FlatStyle = FlatStyle.Flat, BackColor = this.ColBgSidebar, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 8.5f), Cursor = Cursors.Hand };
+                Button btnDirScripts = new Button { Location = new Point(294, 28), Size = new Size(134, 30), FlatStyle = FlatStyle.Flat, BackColor = this.ColBgSidebar, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 8.5f), Cursor = Cursors.Hand };
+                Button btnDirModules = new Button { Location = new Point(434, 28), Size = new Size(134, 30), FlatStyle = FlatStyle.Flat, BackColor = this.ColBgSidebar, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 8.5f), Cursor = Cursors.Hand };
+                btnDirRoot.FlatAppearance.BorderColor = this.ColBorder;
+                btnDirThemes.FlatAppearance.BorderColor = this.ColBorder;
+                btnDirScripts.FlatAppearance.BorderColor = this.ColBorder;
+                btnDirModules.FlatAppearance.BorderColor = this.ColBorder;
+                btnDirRoot.Click += delegate { OpenSubFolder(""); };
+                btnDirThemes.Click += delegate { OpenSubFolder("themes"); };
+                btnDirScripts.Click += delegate { OpenSubFolder("scripts"); };
+                btnDirModules.Click += delegate { OpenSubFolder("modules"); };
+
+                grpFolders.Controls.AddRange(new Control[] { btnDirRoot, btnDirThemes, btnDirScripts, btnDirModules });
+
+                GroupBox grpScriptEditor = new GroupBox
+                {
+                    Location = new Point(16, 94),
+                    Size = new Size(584, 366),
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+
+                FlowLayoutPanel scriptTabBar = new FlowLayoutPanel
+                {
+                    Location = new Point(12, 24),
+                    Size = new Size(560, 30),
+                    BackColor = this.ColBgHeader,
+                    Padding = new Padding(2, 2, 2, 2),
+                    WrapContents = false
+                };
+
+                TextBox editor = new TextBox
+                {
+                    Multiline = true,
+                    ScrollBars = ScrollBars.Both,
+                    WordWrap = false,
+                    AcceptsTab = true,
+                    Location = new Point(12, 58),
+                    Size = new Size(560, 260),
+                    BackColor = Color.FromArgb(11, 17, 32),
+                    ForeColor = Color.FromArgb(248, 250, 252),
+                    Font = new Font("Consolas", 10f)
+                };
+
+                Label lblScriptStatus = new Label
+                {
+                    Location = new Point(12, 328),
+                    Size = new Size(334, 22),
+                    AutoSize = false,
+                    AutoEllipsis = true,
+                    Font = new Font("맑은 고딕", 8.5f),
+                    ForeColor = this.ColTextSecondary
+                };
+
+                Button btnSaveScriptFile = new Button
+                {
+                    Location = new Point(352, 324),
+                    Size = new Size(220, 30),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColAccent,
+                    ForeColor = Color.White,
+                    Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnSaveScriptFile.FlatAppearance.BorderSize = 0;
+
+                string currentRelPath = string.IsNullOrEmpty(initialScriptFile) ? "aliases.txt" : initialScriptFile;
+                Action<string> loadFileIntoEditor = delegate (string rel)
+                {
+                    currentRelPath = rel;
+                    string full = Path.Combine(this.BaseDir, rel.Replace('/', '\\'));
+                    editor.Text = File.Exists(full) ? File.ReadAllText(full, Encoding.UTF8) : "";
+                    lblScriptStatus.Text = Tr("편집 중: ", "Editing: ") + rel;
+                };
+
+                Action saveCurrentScriptFile = delegate
+                {
+                    string full = Path.Combine(this.BaseDir, currentRelPath.Replace('/', '\\'));
+                    File.WriteAllText(full, editor.Text, Encoding.UTF8);
+                    ReloadAllConfigsAndScripts();
+                    populateThemeCombo();
+                    ApplyThemeColorsToUI();
+                    ApplyLanguageToUI();
+                    UpdateHeaderAndModuleBar();
+                    RedrawActiveChatHistory();
+                    lblScriptStatus.Text = "[" + currentRelPath + "] " + Tr("저장 및 반영 완료", "Saved & applied") + " (" + DateTime.Now.ToString("HH:mm:ss") + ")";
+                };
+
+                btnSaveScriptFile.Click += delegate { saveCurrentScriptFile(); };
+                editor.KeyDown += delegate (object s, KeyEventArgs e)
+                {
+                    if (e.Control && e.KeyCode == Keys.S)
+                    {
+                        e.SuppressKeyPress = true;
+                        saveCurrentScriptFile();
+                    }
+                };
+
+                grpScriptEditor.Controls.AddRange(new Control[] { scriptTabBar, editor, lblScriptStatus, btnSaveScriptFile });
+                pageAdvScripts.Controls.AddRange(new Control[] { grpFolders, grpScriptEditor });
+
+                // ============================================================
+                // PAGE 6 (Advanced 6): 모듈 추가 · 가져오기 · 켜기/끄기 · 편집 관리
+                // ============================================================
+                Panel pageAdvModules = pages[6];
+
+                GroupBox grpModList = new GroupBox
+                {
+                    Location = new Point(16, 14),
+                    Size = new Size(584, 212),
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+
+                ListBox lbModules = new ListBox
+                {
+                    Location = new Point(14, 26),
+                    Size = new Size(366, 142),
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.8f),
+                    IntegralHeight = false,
+                    ItemHeight = 20
+                };
+
+                Button btnAddModuleWizard = new Button
+                {
+                    Location = new Point(390, 26),
+                    Size = new Size(180, 32),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColAccent,
+                    ForeColor = Color.White,
+                    Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnAddModuleWizard.FlatAppearance.BorderSize = 0;
+
+                Button btnImportModuleFile = new Button
+                {
+                    Location = new Point(390, 64),
+                    Size = new Size(180, 30),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.6f),
+                    Cursor = Cursors.Hand
+                };
+                btnImportModuleFile.FlatAppearance.BorderColor = this.ColBorder;
+
+                Button btnToggleModule = new Button
+                {
+                    Location = new Point(390, 100),
+                    Size = new Size(180, 30),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextSystem,
+                    Font = new Font("맑은 고딕", 8.6f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnToggleModule.FlatAppearance.BorderColor = this.ColAccent;
+
+                Button btnDeleteModule = new Button
+                {
+                    Location = new Point(390, 136),
+                    Size = new Size(86, 32),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = Color.FromArgb(248, 113, 113),
+                    Font = new Font("맑은 고딕", 8.5f),
+                    Cursor = Cursors.Hand
+                };
+                btnDeleteModule.FlatAppearance.BorderColor = Color.FromArgb(239, 68, 68);
+
+                Button btnOpenModFolder = new Button
+                {
+                    Location = new Point(484, 136),
+                    Size = new Size(86, 32),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.5f),
+                    Cursor = Cursors.Hand
+                };
+                btnOpenModFolder.FlatAppearance.BorderColor = this.ColBorder;
+                btnOpenModFolder.Click += delegate { OpenSubFolder("modules"); };
+
+                Label lblModSelectedInfo = new Label
+                {
+                    Location = new Point(14, 174),
+                    Size = new Size(556, 30),
+                    AutoSize = false,
+                    AutoEllipsis = true,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Font = new Font("맑은 고딕", 8.4f),
+                    ForeColor = this.ColTextSecondary
+                };
+
+                grpModList.Controls.AddRange(new Control[] {
+                    lbModules, btnAddModuleWizard, btnImportModuleFile, btnToggleModule,
+                    btnDeleteModule, btnOpenModFolder, lblModSelectedInfo
+                });
+
+                GroupBox grpModEditor = new GroupBox
+                {
+                    Location = new Point(16, 234),
+                    Size = new Size(584, 226),
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                };
+
+                TextBox txtModEditor = new TextBox
+                {
+                    Multiline = true,
+                    ScrollBars = ScrollBars.Both,
+                    WordWrap = false,
+                    AcceptsTab = true,
+                    Location = new Point(14, 26),
+                    Size = new Size(556, 152),
+                    BackColor = Color.FromArgb(11, 17, 32),
+                    ForeColor = Color.FromArgb(248, 250, 252),
+                    Font = new Font("Consolas", 9.8f)
+                };
+
+                Label lblModEditorStatus = new Label
+                {
+                    Location = new Point(14, 186),
+                    Size = new Size(336, 26),
+                    AutoSize = false,
+                    AutoEllipsis = true,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Font = new Font("맑은 고딕", 8.4f),
+                    ForeColor = this.ColTextSecondary
+                };
+
+                Button btnSaveModEditor = new Button
+                {
+                    Location = new Point(358, 184),
+                    Size = new Size(212, 30),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColAccent,
+                    ForeColor = Color.White,
+                    Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnSaveModEditor.FlatAppearance.BorderSize = 0;
+
+                grpModEditor.Controls.AddRange(new Control[] { txtModEditor, lblModEditorStatus, btnSaveModEditor });
+                pageAdvModules.Controls.AddRange(new Control[] { grpModList, grpModEditor });
+
+                string currentEditingModFile = "";
+
+                Action<string> refreshModulesUI = null;
+                refreshModulesUI = delegate (string selectFileName)
+                {
+                    string prevFile = selectFileName;
+                    if (string.IsNullOrEmpty(prevFile) && lbModules.SelectedIndex >= 0 && lbModules.SelectedIndex < this.InstalledModules.Count)
+                    {
+                        prevFile = this.InstalledModules[lbModules.SelectedIndex].FileName;
+                    }
+
+                    lbModules.BeginUpdate();
+                    lbModules.Items.Clear();
+                    int selIdx = -1;
+                    for (int i = 0; i < this.InstalledModules.Count; i++)
+                    {
+                        ClientModuleDef m = this.InstalledModules[i];
+                        string stateTag = m.Enabled ? Tr("[켜짐]", "[ON]") : Tr("[꺼짐]", "[OFF]");
+                        string srvTag = (m.TargetServer == "*" || string.Equals(m.TargetServer, "all", StringComparison.OrdinalIgnoreCase))
+                            ? Tr("전체 서버(*)", "All Servers(*)")
+                            : m.TargetServer;
+                        lbModules.Items.Add(string.Format("{0} {1}  (대상: {2})  [{3}]", stateTag, m.Name, srvTag, m.FileName));
+                        if (!string.IsNullOrEmpty(prevFile) && string.Equals(m.FileName, prevFile, StringComparison.OrdinalIgnoreCase))
+                        {
+                            selIdx = i;
+                        }
+                    }
+                    lbModules.EndUpdate();
+
+                    if (selIdx >= 0 && selIdx < lbModules.Items.Count) lbModules.SelectedIndex = selIdx;
+                    else if (lbModules.Items.Count > 0) lbModules.SelectedIndex = 0;
+                    else
+                    {
+                        currentEditingModFile = "";
+                        txtModEditor.Text = "";
+                        lblModSelectedInfo.Text = Tr("설치된 모듈이 없습니다. 우측 [+ 새 모듈 만들기] 또는 [파일 가져오기]로 추가해 보세요.", "No modules installed. Click [+ Create New Module] or [Import File] to add one.");
+                        lblModEditorStatus.Text = Tr("선택된 모듈 없음", "No module selected");
+                    }
+                };
+
+                lbModules.SelectedIndexChanged += delegate
+                {
+                    int idx = lbModules.SelectedIndex;
+                    if (idx < 0 || idx >= this.InstalledModules.Count) return;
+                    ClientModuleDef m = this.InstalledModules[idx];
+                    currentEditingModFile = m.FileName;
+                    string full = Path.Combine(this.BaseDir, "modules", m.FileName);
+                    txtModEditor.Text = File.Exists(full) ? File.ReadAllText(full, Encoding.UTF8) : "";
+
+                    string srvDesc = (m.TargetServer == "*" || string.Equals(m.TargetServer, "all", StringComparison.OrdinalIgnoreCase))
+                        ? Tr("모든 서버(*)", "All Servers(*)")
+                        : m.TargetServer;
+                    lblModSelectedInfo.Text = string.Format(
+                        Tr("선택됨: {0} | 작동 서버: {1} | 상단 버튼: {2}개 | 명령어: {3}개 | 트리거: {4}개 (더블클릭 시 켜기/끄기 전환)",
+                           "Selected: {0} | Server: {1} | Buttons: {2} | Commands: {3} | Triggers: {4} (Double-click to toggle)"),
+                        m.Name, srvDesc, m.Buttons.Count, m.Commands.Count, m.Triggers.Count
+                    );
+                    lblModEditorStatus.Text = Tr("모듈 편집 중: modules/", "Editing module: modules/") + m.FileName;
+                };
+
+                Action toggleSelectedModule = delegate
+                {
+                    int idx = lbModules.SelectedIndex;
+                    if (idx < 0 || idx >= this.InstalledModules.Count) return;
+                    ClientModuleDef m = this.InstalledModules[idx];
+                    string full = Path.Combine(this.BaseDir, "modules", m.FileName);
+                    bool nextState = !m.Enabled;
+                    SetModuleEnabledInFile(full, nextState);
+                    ReloadAllConfigsAndScripts();
+                    UpdateHeaderAndModuleBar();
+                    refreshModulesUI(m.FileName);
+                    lblModEditorStatus.Text = string.Format(
+                        Tr("[{0}] 상태 변경: {1}", "[{0}] State changed: {1}"),
+                        m.Name,
+                        nextState ? Tr("켜짐 (활성화됨)", "ON (Enabled)") : Tr("꺼짐 (비활성화됨)", "OFF (Disabled)")
+                    );
+                };
+
+                btnToggleModule.Click += delegate { toggleSelectedModule(); };
+                lbModules.DoubleClick += delegate { toggleSelectedModule(); };
+
+                Action saveCurrentModuleEditor = delegate
+                {
+                    if (string.IsNullOrEmpty(currentEditingModFile)) return;
+                    string full = Path.Combine(this.BaseDir, "modules", currentEditingModFile);
+                    File.WriteAllText(full, txtModEditor.Text, Encoding.UTF8);
+                    ReloadAllConfigsAndScripts();
+                    UpdateHeaderAndModuleBar();
+                    refreshModulesUI(currentEditingModFile);
+                    lblModEditorStatus.Text = "[modules/" + currentEditingModFile + "] " + Tr("저장 및 즉시 반영 완료", "Saved & applied") + " (" + DateTime.Now.ToString("HH:mm:ss") + ")";
+                };
+
+                btnSaveModEditor.Click += delegate { saveCurrentModuleEditor(); };
+                txtModEditor.KeyDown += delegate (object s, KeyEventArgs e)
+                {
+                    if (e.Control && e.KeyCode == Keys.S)
+                    {
+                        e.SuppressKeyPress = true;
+                        saveCurrentModuleEditor();
+                    }
+                };
+
+                btnImportModuleFile.Click += delegate
+                {
+                    using (OpenFileDialog ofd = new OpenFileDialog())
+                    {
+                        ofd.Title = Tr("가져올 모듈 파일(.txt / .ini) 선택", "Select Module File (.txt / .ini) to Import");
+                        ofd.Filter = "NyaaChat Module Files (*.txt;*.ini)|*.txt;*.ini|All Files (*.*)|*.*";
+                        if (ofd.ShowDialog(dlg) == DialogResult.OK && File.Exists(ofd.FileName))
+                        {
+                            string baseName = SanitizeFileName(Path.GetFileNameWithoutExtension(ofd.FileName));
+                            if (string.IsNullOrEmpty(baseName)) baseName = "imported_module";
+                            string destName = baseName + ".txt";
+                            string destPath = Path.Combine(this.BaseDir, "modules", destName);
+                            File.Copy(ofd.FileName, destPath, true);
+                            ReloadAllConfigsAndScripts();
+                            UpdateHeaderAndModuleBar();
+                            refreshModulesUI(destName);
+                            MessageBox.Show(
+                                Tr("외부 모듈 파일 [modules/" + destName + "]을(를) 성공적으로 가져와 적용했습니다.", "Successfully imported and applied module [modules/" + destName + "]."),
+                                Tr("모듈 가져오기 완료", "Module Imported"),
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Information
+                            );
+                        }
+                    }
+                };
+
+                btnDeleteModule.Click += delegate
+                {
+                    int idx = lbModules.SelectedIndex;
+                    if (idx < 0 || idx >= this.InstalledModules.Count) return;
+                    ClientModuleDef m = this.InstalledModules[idx];
+                    DialogResult dr = MessageBox.Show(
+                        string.Format(Tr("정말로 [{0}] (modules/{1}) 모듈을 삭제하시겠습니까?", "Are you sure you want to delete module [{0}] (modules/{1})?"), m.Name, m.FileName),
+                        Tr("모듈 삭제 확인", "Confirm Delete Module"),
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Warning
+                    );
+                    if (dr == DialogResult.Yes)
+                    {
+                        string full = Path.Combine(this.BaseDir, "modules", m.FileName);
+                        try { if (File.Exists(full)) File.Delete(full); } catch { }
+                        ReloadAllConfigsAndScripts();
+                        UpdateHeaderAndModuleBar();
+                        refreshModulesUI("");
+                    }
+                };
+
+                btnAddModuleWizard.Click += delegate
+                {
+                    using (Form wiz = new Form())
+                    {
+                        wiz.Text = Tr("+ 새 모듈 만들기 마법사 (modules/*.txt)", "+ Create New Server Module Wizard");
+                        wiz.Size = new Size(540, 510);
+                        wiz.FormBorderStyle = FormBorderStyle.FixedDialog;
+                        wiz.StartPosition = FormStartPosition.CenterParent;
+                        wiz.MaximizeBox = false;
+                        wiz.MinimizeBox = false;
+                        wiz.BackColor = this.ColBgWindow;
+                        wiz.ForeColor = this.ColTextPrimary;
+                        ApplyWindowTitleBarTheme(wiz);
+
+                        string defaultHost = (this.ActiveSession != null && !string.IsNullOrEmpty(this.ActiveSession.Host)) ? this.ActiveSession.Host : "*";
+
+                        Label lwFile = new Label { Text = Tr("파일 이름 (.txt):", "File Name (.txt):"), Location = new Point(16, 16), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                        TextBox twFile = new TextBox { Text = "my_custom_module.txt", Location = new Point(156, 13), Width = 350, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 9f) };
+
+                        Label lwName = new Label { Text = Tr("모듈 표시 이름:", "Module Name:"), Location = new Point(16, 50), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                        TextBox twName = new TextBox { Text = Tr("내 서버 전용 확장 도우미", "My Custom Server Helper"), Location = new Point(156, 47), Width = 350, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 9f) };
+
+                        Label lwTarget = new Label { Text = Tr("작동 대상 서버:", "Target Server:"), Location = new Point(16, 84), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                        TextBox twTarget = new TextBox { Text = defaultHost, Location = new Point(156, 81), Width = 186, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 9f) };
+
+                        Button bwCurSrv = new Button
+                        {
+                            Text = Tr("현재 서버", "Active Srv"),
+                            Location = new Point(348, 80),
+                            Size = new Size(76, 26),
+                            FlatStyle = FlatStyle.Flat,
+                            BackColor = this.ColBgSidebar,
+                            ForeColor = this.ColTextPrimary,
+                            Font = new Font("맑은 고딕", 8.2f),
+                            Cursor = Cursors.Hand
+                        };
+                        bwCurSrv.FlatAppearance.BorderColor = this.ColBorder;
+                        bwCurSrv.Click += delegate
+                        {
+                            twTarget.Text = (this.ActiveSession != null && !string.IsNullOrEmpty(this.ActiveSession.Host))
+                                ? this.ActiveSession.Host
+                                : ExtractHost(GetIni("Server", "Url", "nemulo.duckdns.org"));
+                        };
+
+                        Button bwAllSrv = new Button
+                        {
+                            Text = Tr("전체 서버(*)", "All (*)"),
+                            Location = new Point(430, 80),
+                            Size = new Size(76, 26),
+                            FlatStyle = FlatStyle.Flat,
+                            BackColor = this.ColBgSidebar,
+                            ForeColor = this.ColTextSystem,
+                            Font = new Font("맑은 고딕", 8.2f, FontStyle.Bold),
+                            Cursor = Cursors.Hand
+                        };
+                        bwAllSrv.FlatAppearance.BorderColor = this.ColAccent;
+                        bwAllSrv.Click += delegate { twTarget.Text = "*"; };
+
+                        Label lwDesc = new Label { Text = Tr("모듈 간단 설명:", "Description:"), Location = new Point(16, 118), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                        TextBox twDesc = new TextBox { Text = Tr("상단 확장 바 버튼 및 전용 슬래시 명령어 모음", "Custom top bar buttons and slash commands"), Location = new Point(156, 115), Width = 350, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 9f) };
+
+                        Label lwBtns = new Label { Text = Tr("[Buttons] 채팅창 상단 빠른 실행 버튼 (한 줄에 '버튼이름 = 명령어 또는 채팅'):", "[Buttons] Top Bar Quick Buttons ('ButtonLabel = /cmd or chat text' per line):"), Location = new Point(16, 150), AutoSize = true, Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold), ForeColor = this.ColTextSystem };
+                        TextBox twBtns = new TextBox
+                        {
+                            Multiline = true,
+                            ScrollBars = ScrollBars.Vertical,
+                            Location = new Point(16, 172),
+                            Size = new Size(490, 68),
+                            BackColor = Color.FromArgb(11, 17, 32),
+                            ForeColor = Color.FromArgb(248, 250, 252),
+                            Font = new Font("Consolas", 9.5f),
+                            Text = "인사하기 = 안녕하세요! 반갑습니다 :)\r\n내정보 = /whois $me\r\n주사위 = !주사위"
+                        };
+
+                        Label lwCmds = new Label { Text = Tr("[Commands] 전용 슬래시 명령어 (한 줄에 '/명령어 = SAY|NOTICE|ACTION | 내용'):", "[Commands] Custom Slash Commands ('/cmd = SAY|NOTICE|ACTION | text' per line):"), Location = new Point(16, 248), AutoSize = true, Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold), ForeColor = this.ColTextSystem };
+                        TextBox twCmds = new TextBox
+                        {
+                            Multiline = true,
+                            ScrollBars = ScrollBars.Vertical,
+                            Location = new Point(16, 270),
+                            Size = new Size(490, 68),
+                            BackColor = Color.FromArgb(11, 17, 32),
+                            ForeColor = Color.FromArgb(248, 250, 252),
+                            Font = new Font("Consolas", 9.5f),
+                            Text = "/환영 = SAY | $1님 어서오세요! 환영합니다~\r\n/메모 = NOTICE | [내 메모] $1-"
+                        };
+
+                        Label lwTrigs = new Label { Text = Tr("[Triggers] 채팅 키워드 자동 반응 (한 줄에 '키워드 = NOTICE|REPLY|SOUND | 내용'):", "[Triggers] Keyword Auto-Triggers ('keyword = NOTICE|REPLY|SOUND | value'):"), Location = new Point(16, 346), AutoSize = true, Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold), ForeColor = this.ColTextSystem };
+                        TextBox twTrigs = new TextBox
+                        {
+                            Multiline = true,
+                            ScrollBars = ScrollBars.Vertical,
+                            Location = new Point(16, 368),
+                            Size = new Size(490, 48),
+                            BackColor = Color.FromArgb(11, 17, 32),
+                            ForeColor = Color.FromArgb(248, 250, 252),
+                            Font = new Font("Consolas", 9.5f),
+                            Text = "; !도움 = NOTICE | 모듈 자동 알림 예시입니다."
+                        };
+
+                        Button bwCreate = new Button
+                        {
+                            Text = Tr("모듈 생성 및 즉시 추가", "Create & Enable Module"),
+                            Location = new Point(216, 426),
+                            Size = new Size(192, 34),
+                            FlatStyle = FlatStyle.Flat,
+                            BackColor = this.ColAccent,
+                            ForeColor = Color.White,
+                            Font = new Font("맑은 고딕", 9.2f, FontStyle.Bold),
+                            DialogResult = DialogResult.OK,
+                            Cursor = Cursors.Hand
+                        };
+                        bwCreate.FlatAppearance.BorderSize = 0;
+
+                        Button bwCancel = new Button
+                        {
+                            Text = Tr("취소", "Cancel"),
+                            Location = new Point(416, 426),
+                            Size = new Size(90, 34),
+                            FlatStyle = FlatStyle.Flat,
+                            BackColor = this.ColBgSidebar,
+                            ForeColor = this.ColTextPrimary,
+                            Font = new Font("맑은 고딕", 9f),
+                            DialogResult = DialogResult.Cancel,
+                            Cursor = Cursors.Hand
+                        };
+                        bwCancel.FlatAppearance.BorderColor = this.ColBorder;
+
+                        wiz.AcceptButton = bwCreate;
+                        wiz.CancelButton = bwCancel;
+                        wiz.Controls.AddRange(new Control[] {
+                            lwFile, twFile, lwName, twName, lwTarget, twTarget, bwCurSrv, bwAllSrv,
+                            lwDesc, twDesc, lwBtns, twBtns, lwCmds, twCmds, lwTrigs, twTrigs,
+                            bwCreate, bwCancel
+                        });
+
+                        if (wiz.ShowDialog(dlg) == DialogResult.OK)
+                        {
+                            string safeFn = SanitizeFileName(twFile.Text.Trim());
+                            if (string.IsNullOrEmpty(safeFn)) safeFn = "custom_module.txt";
+                            if (!safeFn.EndsWith(".txt", StringComparison.OrdinalIgnoreCase)) safeFn += ".txt";
+
+                            string modId = Path.GetFileNameWithoutExtension(safeFn);
+                            string modName = string.IsNullOrEmpty(twName.Text.Trim()) ? modId : twName.Text.Trim();
+                            string modTarget = string.IsNullOrEmpty(twTarget.Text.Trim()) ? "*" : twTarget.Text.Trim();
+                            string modDesc = twDesc.Text.Trim();
+
+                            StringBuilder sbMod = new StringBuilder();
+                            sbMod.AppendLine("; ============================================================================");
+                            sbMod.AppendLine("; Nyaa Chat Custom Module: " + safeFn);
+                            sbMod.AppendLine("; - TargetServer 에 지정된 서버(또는 * 전체 서버)에서 자동 활성화됩니다.");
+                            sbMod.AppendLine("; ============================================================================");
+                            sbMod.AppendLine();
+                            sbMod.AppendLine("[Module]");
+                            sbMod.AppendLine("Id=" + modId);
+                            sbMod.AppendLine("Name=" + modName);
+                            sbMod.AppendLine("Version=1.0");
+                            sbMod.AppendLine("Enabled=true");
+                            sbMod.AppendLine("TargetServer=" + modTarget);
+                            sbMod.AppendLine("Description=" + modDesc);
+                            sbMod.AppendLine();
+                            sbMod.AppendLine("[Buttons]");
+                            sbMod.AppendLine(twBtns.Text.Trim());
+                            sbMod.AppendLine();
+                            sbMod.AppendLine("[Commands]");
+                            sbMod.AppendLine(twCmds.Text.Trim());
+                            sbMod.AppendLine();
+                            sbMod.AppendLine("[Triggers]");
+                            sbMod.AppendLine(twTrigs.Text.Trim());
+                            sbMod.AppendLine();
+
+                            string fullPath = Path.Combine(this.BaseDir, "modules", safeFn);
+                            File.WriteAllText(fullPath, sbMod.ToString(), Encoding.UTF8);
+
+                            ReloadAllConfigsAndScripts();
+                            UpdateHeaderAndModuleBar();
+                            refreshModulesUI(safeFn);
+                            lblModEditorStatus.Text = Tr("새 모듈 생성 및 적용 완료: modules/", "Created & applied new module: modules/") + safeFn;
+                        }
+                    }
+                };
+
+                // ============================================================
+                // Live Preview & Language Synchronization Logic
+                // ============================================================
+                bool suppressEvents = false;
+
+                Action applyLivePreview = delegate
+                {
+                    if (suppressEvents) return;
+                    string fName = cbFName.SelectedItem != null ? Convert.ToString(cbFName.SelectedItem) : this.CurrentFontName;
+                    float fSize = (float)numFSize.Value;
+                    string fWeight = cbFWeight.SelectedIndex == 1 ? "bold" : (cbFWeight.SelectedIndex == 2 ? "light" : "normal");
+
+                    RebuildChatFonts(fName, fSize, fWeight);
+                    SetIniValue("Theme", "ShowTimestamps", chkShowTs.Checked ? "true" : "false", false);
+                    ApplyHardwareSafeOpacity((int)numWinOpacity.Value);
+
+                    ApplyThemeColorsToUI();
+                    ApplyWindowTitleBarTheme(dlg);
+                    UpdateHeaderAndModuleBar();
+                    RedrawActiveChatHistory();
+
+                    pnlMiniPreviewHeader.BackColor = this.ColBgHeader;
+                    lblMiniHeader.ForeColor = this.ColTextPrimary;
+                    pnlMiniPreviewChat.BackColor = this.ColBgChat;
+                    lblMiniChatSample.ForeColor = this.ColTextPrimary;
+                    lblMiniChatSample.Font = this.ChatFont;
+                };
+
+                Action<Color> applyColorToSelectedSlot = delegate (Color chosen)
+                {
+                    int idx = lbSlots.SelectedIndex;
+                    if (idx < 0 || idx >= colorSlots.Length) return;
+                    string key = colorSlots[idx][0];
+                    setSlotColor(key, chosen);
+                    pnlCurrentColorBox.BackColor = chosen;
+                    txtHexCode.Text = ColorToHex(chosen);
+                    refreshSlotListLabels();
+                    applyLivePreview();
+                };
+
+                for (int i = 0; i < paletteHexes.Length; i++)
+                {
+                    int col = i % 8;
+                    int row = i / 8;
+                    Color swatchCol = ParseColor(paletteHexes[i], Color.Black);
+                    Button bSwatch = new Button
+                    {
+                        Location = new Point(col * 37, row * 34),
+                        Size = new Size(34, 30),
+                        FlatStyle = FlatStyle.Flat,
+                        BackColor = swatchCol,
+                        Cursor = Cursors.Hand,
+                        Text = ""
+                    };
+                    bSwatch.FlatAppearance.BorderColor = Color.FromArgb(100, 116, 139);
+                    bSwatch.FlatAppearance.BorderSize = 1;
+                    Color capturedColor = swatchCol;
+                    bSwatch.Click += delegate { applyColorToSelectedSlot(capturedColor); };
+                    pnlSwatchGrid.Controls.Add(bSwatch);
+                };
+
+                lbSlots.SelectedIndexChanged += delegate
+                {
+                    int idx = lbSlots.SelectedIndex;
+                    if (idx >= 0 && idx < colorSlots.Length)
+                    {
+                        Color c = getSlotColor(colorSlots[idx][0]);
+                        lblSelectedSlot.Text = Tr("선택 항목: ", "Selected: ") + getSlotDisplayLabel(idx);
+                        pnlCurrentColorBox.BackColor = c;
+                        txtHexCode.Text = ColorToHex(c);
+                    }
+                };
+
+                btnApplyHex.Click += delegate
+                {
+                    string h = txtHexCode.Text.Trim();
+                    if (!h.StartsWith("#")) h = "#" + h;
+                    try
+                    {
+                        Color c = ColorTranslator.FromHtml(h);
+                        applyColorToSelectedSlot(c);
+                    }
+                    catch
+                    {
+                        MessageBox.Show(
+                            Tr("올바른 #RRGGBB 색상 코드를 입력해 주세요. (예: #1E293B)", "Please enter a valid #RRGGBB hex color code (e.g., #1E293B)."),
+                            Tr("색상 코드 안내", "Invalid Color Code"),
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                    }
+                };
+
+                btnOpenColorDialog.Click += delegate
+                {
+                    int idx = lbSlots.SelectedIndex;
+                    if (idx < 0 || idx >= colorSlots.Length) return;
+                    using (ColorDialog cd = new ColorDialog())
+                    {
+                        cd.FullOpen = true;
+                        cd.Color = getSlotColor(colorSlots[idx][0]);
+                        if (cd.ShowDialog(dlg) == DialogResult.OK)
+                        {
+                            applyColorToSelectedSlot(cd.Color);
+                        }
+                    }
+                };
+
+                btnWinFontDlg.Click += delegate
+                {
+                    using (FontDialog fd = new FontDialog())
+                    {
+                        fd.Font = this.ChatFont;
+                        fd.MinSize = 8;
+                        fd.MaxSize = 22;
+                        if (fd.ShowDialog(dlg) == DialogResult.OK)
+                        {
+                            string fn = fd.Font.Name;
+                            int fIdx = cbFName.FindStringExact(fn);
+                            if (fIdx < 0) fIdx = cbFName.Items.Add(fn);
+                            cbFName.SelectedIndex = fIdx;
+                            numFSize.Value = Math.Max(8, Math.Min(22, (int)Math.Round(fd.Font.SizeInPoints)));
+                            cbFWeight.SelectedIndex = fd.Font.Bold ? 1 : 0;
+                            applyLivePreview();
+                        }
+                    }
+                };
+
+                Action<string> writeThemeIniFile = delegate (string themeFileName)
+                {
+                    if (string.IsNullOrEmpty(themeFileName)) themeFileName = "default_dark.ini";
+                    if (!themeFileName.EndsWith(".ini", StringComparison.OrdinalIgnoreCase)) themeFileName += ".ini";
+
+                    string fName = cbFName.SelectedItem != null ? Convert.ToString(cbFName.SelectedItem) : this.CurrentFontName;
+                    int fSize = (int)numFSize.Value;
+                    string fWeight = cbFWeight.SelectedIndex == 1 ? "bold" : (cbFWeight.SelectedIndex == 2 ? "light" : "normal");
+
+                    StringBuilder sbTheme = new StringBuilder();
+                    sbTheme.AppendLine("; ============================================================================");
+                    sbTheme.AppendLine("; Nyaa Chat Native Theme (" + themeFileName + ")");
+                    sbTheme.AppendLine("; ============================================================================");
+                    sbTheme.AppendLine("[Colors]");
+                    sbTheme.AppendLine("BgTitleBar=" + ColorToHex(this.ColBgTitleBar));
+                    sbTheme.AppendLine("TextTitleBar=" + ColorToHex(this.ColTextTitleBar));
+                    sbTheme.AppendLine("BgWindow=" + ColorToHex(this.ColBgWindow));
+                    sbTheme.AppendLine("BgSidebar=" + ColorToHex(this.ColBgSidebar));
+                    sbTheme.AppendLine("BgChat=" + ColorToHex(this.ColBgChat));
+                    sbTheme.AppendLine("BgInput=" + ColorToHex(this.ColBgInput));
+                    sbTheme.AppendLine("BgToolbar=" + ColorToHex(this.ColBgToolbar));
+                    sbTheme.AppendLine("BgHeader=" + ColorToHex(this.ColBgHeader));
+                    sbTheme.AppendLine("TextPrimary=" + ColorToHex(this.ColTextPrimary));
+                    sbTheme.AppendLine("TextSecondary=" + ColorToHex(this.ColTextSecondary));
+                    sbTheme.AppendLine("TextSystem=" + ColorToHex(this.ColTextSystem));
+                    sbTheme.AppendLine("TextSelfNick=" + ColorToHex(this.ColTextSelfNick));
+                    sbTheme.AppendLine("TextOtherNick=" + ColorToHex(this.ColTextOtherNick));
+                    sbTheme.AppendLine("TextOpBadge=" + ColorToHex(this.ColTextOpBadge));
+                    sbTheme.AppendLine("TextAction=" + ColorToHex(this.ColTextAction));
+                    sbTheme.AppendLine("TextTimestamp=" + ColorToHex(this.ColTextTimestamp));
+                    sbTheme.AppendLine("AccentPrimary=" + ColorToHex(this.ColAccent));
+                    sbTheme.AppendLine("BorderColor=" + ColorToHex(this.ColBorder));
+                    sbTheme.AppendLine();
+                    sbTheme.AppendLine("[Font]");
+                    sbTheme.AppendLine("FontName=" + fName);
+                    sbTheme.AppendLine("FontSize=" + fSize);
+                    sbTheme.AppendLine("FontWeight=" + fWeight);
+
+                    File.WriteAllText(Path.Combine(this.BaseDir, "themes", themeFileName), sbTheme.ToString(), Encoding.UTF8);
+                };
+
+                btnSaveAsNew.Click += delegate
+                {
+                    using (Form nameDlg = new Form())
+                    {
+                        nameDlg.Text = Tr("새 테마 파일 이름 입력", "Save As New Theme File");
+                        nameDlg.Size = new Size(360, 150);
+                        nameDlg.FormBorderStyle = FormBorderStyle.FixedDialog;
+                        nameDlg.StartPosition = FormStartPosition.CenterParent;
+                        nameDlg.BackColor = this.ColBgWindow;
+                        nameDlg.ForeColor = this.ColTextPrimary;
+                        ApplyWindowTitleBarTheme(nameDlg);
+
+                        Label l = new Label { Text = Tr("저장할 테마 파일 이름 (영문/한글):", "New theme filename:"), Location = new Point(16, 16), AutoSize = true };
+                        TextBox t = new TextBox { Text = "my_custom_theme.ini", Location = new Point(16, 40), Width = 310, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
+                        Button bOk = new Button { Text = Tr("저장", "Save"), Location = new Point(166, 72), Size = new Size(80, 28), FlatStyle = FlatStyle.Flat, BackColor = this.ColAccent, ForeColor = Color.White, DialogResult = DialogResult.OK };
+                        Button bNo = new Button { Text = Tr("취소", "Cancel"), Location = new Point(252, 72), Size = new Size(74, 28), FlatStyle = FlatStyle.Flat, BackColor = this.ColBgSidebar, ForeColor = this.ColTextPrimary, DialogResult = DialogResult.Cancel };
+                        nameDlg.AcceptButton = bOk;
+                        nameDlg.CancelButton = bNo;
+                        nameDlg.Controls.AddRange(new Control[] { l, t, bOk, bNo });
+
+                        if (nameDlg.ShowDialog(dlg) == DialogResult.OK && !string.IsNullOrEmpty(t.Text.Trim()))
+                        {
+                            string safeName = SanitizeFileName(t.Text.Trim());
+                            if (!safeName.EndsWith(".ini", StringComparison.OrdinalIgnoreCase)) safeName += ".ini";
+                            writeThemeIniFile(safeName);
+                            SetIniValue("Theme", "ActiveTheme", safeName, true);
+                            suppressEvents = true;
+                            populateThemeCombo();
+                            suppressEvents = false;
+                            MessageBox.Show(
+                                Tr("새 테마 [themes/" + safeName + "] 파일로 저장 및 적용되었습니다.", "Saved and applied new theme [themes/" + safeName + "]."),
+                                Tr("새 테마 저장 완료", "New Theme Saved"),
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Information);
+                        }
+                    }
+                };
+
+                Action rebuildScriptTabs = delegate
+                {
+                    scriptTabBar.Controls.Clear();
+                    string activeThemeFile = "themes/" + GetIni("Theme", "ActiveTheme", "default_dark.ini");
+                    string[][] tabs = new string[][] {
+                        new string[] { Tr("단축명령 (aliases)", "Aliases"), "aliases.txt" },
+                        new string[] { Tr("유저스크립트", "User Script"), "scripts/user_script.txt" },
+                        new string[] { Tr("현재 테마 (.ini)", "Active Theme"), activeThemeFile },
+                        new string[] { Tr("settings.ini", "settings.ini"), "settings.ini" }
+                    };
+                    foreach (string[] t in tabs)
+                    {
+                        string label = t[0];
+                        string rel = t[1];
+                        Button tb = new Button
+                        {
+                            Text = label,
+                            AutoSize = true,
+                            Height = 24,
+                            FlatStyle = FlatStyle.Flat,
+                            BackColor = this.ColBgSidebar,
+                            ForeColor = this.ColTextPrimary,
+                            Font = new Font("맑은 고딕", 8.2f),
+                            Cursor = Cursors.Hand,
+                            Margin = new Padding(2, 1, 2, 1)
+                        };
+                        tb.FlatAppearance.BorderColor = this.ColBorder;
+                        tb.Click += delegate { loadFileIntoEditor(rel); };
+                        scriptTabBar.Controls.Add(tb);
+                    }
+                    Button btnGoModTab = new Button
+                    {
+                        Text = Tr("모듈 추가·관리 탭으로 →", "Go to Modules Manager →"),
+                        AutoSize = true,
+                        Height = 24,
+                        FlatStyle = FlatStyle.Flat,
+                        BackColor = this.ColBgSidebar,
+                        ForeColor = this.ColTextSystem,
+                        Font = new Font("맑은 고딕", 8.2f, FontStyle.Bold),
+                        Cursor = Cursors.Hand,
+                        Margin = new Padding(4, 1, 2, 1)
+                    };
+                    btnGoModTab.FlatAppearance.BorderColor = this.ColAccent;
+                    btnGoModTab.Click += delegate { switchPage(6); };
+                    scriptTabBar.Controls.Add(btnGoModTab);
+                };
+
+                Action refreshSettingsLanguage = delegate
+                {
+                    suppressEvents = true;
+                    dlg.Text = Tr("Nyaa Chat 설정 (F10 / /settings)", "Nyaa Chat Settings (F10 / /settings)");
+
+                    lblNavHeader.Text = Tr("설정 메뉴", "Settings Menu");
+                    btnNavQuick.Text = Tr("★ 간편 설정", "★ Quick Settings");
+                    advBtns[0].Text = Tr("1. 서버 · 프로필 상세", "1. Server & Profile");
+                    advBtns[1].Text = Tr("2. 색상 팔레트 · 글꼴", "2. Colors & Font");
+                    advBtns[2].Text = Tr("3. 창 · 레이아웃 · 숨김", "3. Window & Layout");
+                    advBtns[3].Text = Tr("4. 효과음 · 보안 · 로그", "4. Sound & Security");
+                    advBtns[4].Text = Tr("5. 스크립트 · 폴더 관리", "5. Scripts & Folders");
+                    advBtns[5].Text = Tr("6. 모듈 추가 · 관리", "6. Modules Manager");
+                    updateNavVisuals();
+
+                    // Page 0: Quick Settings
+                    lblQuickIntro.Text = Tr("★ 간편 설정 — 자주 쓰는 핵심 설정과 도구를 한곳에서 빠르게 제어합니다.", "★ Quick Settings — Control essential settings and quick tools in one place.");
+                    grpQuickBasic.Text = Tr("기본 프로필 · 언어 · 시작 접속", "Profile, Language & Startup");
+                    lLang.Text = Tr("표시 언어:", "Language:");
+                    lNick.Text = Tr("기본 닉네임:", "Nickname:");
+                    chkApplyNickLive.Text = Tr("저장 시 접속 서버에 닉네임 즉시 반영", "Update nick on connected servers");
+                    chkAutoConnect.Text = Tr("시작 시 기본 서버 자동 접속", "Auto-connect on startup");
+
+                    grpQuickAppearance.Text = Tr("테마 프리셋 · 색상 및 글꼴", "Theme Preset, Colors & Font");
+                    lActiveTheme.Text = Tr("테마 프리셋:", "Theme File:");
+                    btnGoColorPalette.Text = Tr("색상 팔레트 상세 설정 (16색/스와치) →", "Open Full 16-Color Palette →");
+                    lFName.Text = Tr("글꼴:", "Font:");
+                    lFSize.Text = Tr("크기:", "Size:");
+                    lFWeight.Text = Tr("굵기:", "Weight:");
+
+                    int curFW = cbFWeight.SelectedIndex >= 0 ? cbFWeight.SelectedIndex : initFWeightIdx;
+                    cbFWeight.Items.Clear();
+                    cbFWeight.Items.Add(Tr("기본 (닉네임 굵게)", "Normal (Bold Nick)"));
+                    cbFWeight.Items.Add(Tr("진하게 (전체 굵게)", "Bold (All Bold)"));
+                    cbFWeight.Items.Add(Tr("보통 (전체 보통)", "Light (All Regular)"));
+                    cbFWeight.SelectedIndex = curFW;
+
+                    grpQuickTools.Text = Tr("창 제어 · 효과음 · 스크립트 · 모듈 · 폴더 빠른 도구", "Window, Sounds, Scripts, Modules & Folders");
+                    chkAlwaysOnTop.Text = Tr("창 항상 위 고정 (창고정)", "Always on Top (Pin)");
+                    chkEnableSounds.Text = Tr("효과음 켜기", "Enable Sounds");
+                    chkWarnExternalLinks.Text = Tr("외부 링크 보안 경고", "Link Security Warning");
+                    btnQuickBossHide.Text = Tr("숨김 (Alt+Q)", "Hide (Alt+Q)");
+                    btnQuickOpenFolder.Text = Tr("폴더 열기", "Open Folder");
+                    btnQuickScripts.Text = Tr("스크립트 (Alt+R)", "Scripts (Alt+R)");
+                    btnQuickModules.Text = Tr("모듈 관리", "Modules");
+                    btnQuickSounds.Text = Tr("효과음 상세", "Sound Setup");
+                    lblQuickHotkeys.Text = Tr("* 단축키: [F2] 서버 리스트   [F10] 설정   [Alt+R] 스크립트   [/modules] 모듈 관리   [Alt+Q] 창 숨김", "* Hotkeys: [F2] Servers   [F10] Settings   [Alt+R] Scripts   [/modules] Modules   [Alt+Q] Boss Hide");
+                    btnExpandAdvBottom.Text = Tr("⚙ 고급 설정 열기 (서버 · 색상 팔레트 · 레이아웃 · 효과음 · 스크립트 · 모듈 전체 옵션 보기)", "⚙ Open Advanced Settings (Server, Palette, Layout, Sound, Script & Module Options)");
+
+                    // Page 1: Server & Profile
+                    grpServerConn.Text = Tr("기본 접속 서버 및 다중 서버 자동 연결 설정", "Default Server & Multi-Server Auto-Connect");
+                    lSrvUrl.Text = Tr("기본 접속 서버 주소:", "Default Server URL:");
+                    lDefChan.Text = Tr("기본 입장 채널:", "Default Channel:");
+                    lExtraSrvs.Text = Tr("동시 접속 서버 목록:", "Extra Auto-Servers:");
+                    lExtraHint.Text = Tr("예: https://server2.org/#게임, https://server3.org/#소드걸스\r\n콤마(,)로 구분하여 입력하면 시작 시 여러 서버에 동시 접속합니다.", "Example: https://server2.org/#games, https://server3.org/#anime\r\nComma-separated list of extra servers to connect on startup.");
+
+                    grpAutoJoin.Text = Tr("IRC 스타일 서버별 채널 자동 입장 (Auto-Join)", "IRC-style Per-Server Channel Auto-Join");
+                    lblAutoJoinTitle.Text = Tr("서버 주소(도메인/URL) = #채널1, #채널2, #채널3 (한 줄에 서버 하나씩 지정):", "Server domain or URL = #chan1, #chan2, #chan3 (One server per line):");
+                    lblAutoJoinHint.Text = Tr("* 클라이언트 로컬에만 저장되며, 해당 서버에 접속할 때 등록된 채널들에 자동 입장(Join)합니다.", "* Stored client-side only. Automatically joins channels when connecting to the server.");
+
+                    grpProfileAdv.Text = Tr("프로필 상세 및 고유 식별 ID", "Profile Details & Client User ID");
+                    lQuitMsg.Text = Tr("종료 인사말 (Quit):", "Quit Message:");
+                    lUserId.Text = Tr("고유 식별 ID:", "Client User ID:");
+                    btnRegenUserId.Text = Tr("새 ID로 재생성", "Regenerate ID");
+
+                    // Page 2: Colors & Font
+                    grpColors.Text = Tr("클라이언트 16색 상세 팔레트 & 32색 스와치 커스터마이징 (클릭 시 즉시 미리보기)", "16-Slot Color Palette & 32-Swatch Customizer (Live Preview on Click)");
+                    btnApplyHex.Text = Tr("HEX 적용", "Apply HEX");
+                    btnOpenColorDialog.Text = Tr("RGB 피커...", "RGB Picker...");
+                    lblPaletteGridGuide.Text = Tr("빠른 색상 칩 (클릭 시 선택한 항목에 즉시 반영):", "Quick Swatches (Click to apply to selected slot):");
+                    lblMiniHeader.Text = Tr("#자유대화 [미리보기 헤더바]", "#general [Header Preview]");
+                    lblMiniChatSample.Text = Tr("<내닉네임> 글꼴·크기·굵기·배경색 미리보기입니다.", "<MyNick> Live preview of font & colors.");
+                    btnWinFontDlg.Text = Tr("윈도우 기본 글꼴 선택 대화상자 열기...", "Open Windows System Font Picker...");
+                    btnSaveAsNew.Text = Tr("현재 색상/글꼴 구성을 새 테마 파일(themes/*.ini)로 저장...", "Save Current Colors & Font As New Theme File (themes/*.ini)...");
+                    refreshSlotListLabels();
+                    int selIdx = lbSlots.SelectedIndex;
+                    if (selIdx >= 0 && selIdx < colorSlots.Length)
+                    {
+                        lblSelectedSlot.Text = Tr("선택 항목: ", "Selected: ") + getSlotDisplayLabel(selIdx);
+                    }
+
+                    // Page 3: Window & Layout
+                    grpWinBehavior.Text = Tr("창 제목 · 트레이 최소화 · 타임스탬프 · 투명도", "Window Title, Tray Minimize, Timestamps & Opacity");
+                    lWinTitle.Text = Tr("창 제목 표시줄:", "Window Title:");
+                    chkMinToTray.Text = Tr("창 닫기(X) 버튼을 누를 때 종료하지 않고 시스템 트레이 아이콘으로 숨기기", "Minimize to system tray instead of exiting when closing window (X)");
+                    chkShowTs.Text = Tr("채팅창에 메시지 시각([HH:mm:ss]) 표시", "Show message timestamps ([HH:mm:ss]) in chat");
+                    lWinOpacity.Text = Tr("창 투명도 (30~100%):", "Window Opacity (%):");
+                    btnAdvBossHide.Text = Tr("지금 창 즉시 숨김 (Alt+Q)", "Hide Window Now (Alt+Q)");
+                    lBossKeyInfo.Text = Tr("* 보스 키 안내: 언제든 Alt + Q 를 누르면 창을 즉시 숨기거나 다시 띄웁니다.", "* Boss Key: Press Alt + Q anytime to instantly hide or restore the window.");
+
+                    grpLayoutSplit.Text = Tr("좌/우 사이드바 패널 기본 너비(폭) 설정", "Left & Right Sidebar Panel Widths");
+                    lLeftWidth.Text = Tr("좌측 서버·채널 트리 폭 (기본 240px):", "Left Server/Channel Tree Width (240px):");
+                    lRightWidth.Text = Tr("우측 참여자 목록 폭 (기본 200px):", "Right User List Width (200px):");
+                    btnApplySplitNow.Text = Tr("현재 창에 분할 폭 즉시 적용", "Apply Panel Widths Now");
+                    btnResetSplitDef.Text = Tr("기본 폭(240 / 200)으로 초기화", "Reset to Default (240 / 200)");
+
+                    // Page 4: Sound & Security
+                    grpSounds.Text = Tr("상황별 사용자 효과음 연결 설정 (sounds/*.wav)", "User Sound Effects by Event (sounds/*.wav)");
+                    lblSoundNotice.Text = Tr("원하시는 .wav 파일을 sounds/ 폴더에 넣으신 후 상황별로 선택하세요.\r\n(기본 배포판에는 무거운 미디어 파일이 포함되지 않습니다)", "Place your .wav files in the sounds/ folder and assign them below.");
+                    btnOpenSoundsDir.Text = Tr("sounds/ 폴더 열기", "Open sounds/ Folder");
+                    sndLabels[0].Text = Tr("내 닉네임 멘션:", "Mention Alert:");
+                    sndLabels[1].Text = Tr("일반 메시지 수신:", "New Message:");
+                    sndLabels[2].Text = Tr("채널 입/퇴장 알림:", "Channel Join/Part:");
+                    sndLabels[3].Text = Tr("시스템 경고 알림:", "System Alert:");
+                    for (int i = 0; i < 4; i++) sndTestBtns[i].Text = Tr("▶ 미리듣기", "▶ Test");
+                    chkBeepFallback.Text = Tr("효과음 파일 미지정 시 닉네임 멘션에 윈도우 기본 알림음 사용", "Use Windows default beep on mention when no .wav file is assigned");
+
+                    grpSecLog.Text = Tr("대화 로그 자동 저장 (logs/ 폴더)", "Automatic Chat Logging (logs/ folder)");
+                    chkSaveLogs.Text = Tr("접속 중인 서버/채널별 대화 내역을 logs/ 폴더에 날짜별로 자동 저장", "Automatically save channel chat logs by server and date in logs/ folder");
+                    btnOpenLogsDir.Text = Tr("logs/ 대화로그 폴더 열기", "Open logs/ Folder");
+
+                    // Page 5: Scripts & Folders
+                    grpFolders.Text = Tr("클라이언트 주요 폴더 빠른 열기", "Quick Open Client Folders");
+                    btnDirRoot.Text = Tr("클라이언트 폴더", "Root Folder");
+                    btnDirThemes.Text = Tr("themes/ 테마", "themes/ Folder");
+                    btnDirScripts.Text = Tr("scripts/ 스크립트", "scripts/ Folder");
+                    btnDirModules.Text = Tr("modules/ 모듈", "modules/ Folder");
+
+                    int ruleCount = this.ReplaceSendRules.Count + this.CustomCommandRules.Count + this.OnTextRules.Count;
+                    grpScriptEditor.Text = Tr(
+                        string.Format("내장 스크립트 · 테마 · 설정 편집기 (단축명령 {0}개 | 스크립트 {1}개 | 모듈 {2}개)", this.AliasesMap.Count, ruleCount, this.InstalledModules.Count),
+                        string.Format("Built-in Script & Config Editor ({0} Aliases | {1} Rules | {2} Modules)", this.AliasesMap.Count, ruleCount, this.InstalledModules.Count)
+                    );
+                    btnSaveScriptFile.Text = Tr("편집 파일 저장 및 반영 (Ctrl+S)", "Save & Apply File (Ctrl+S)");
+                    rebuildScriptTabs();
+
+                    // Page 6: Modules Manager
+                    grpModList.Text = Tr(
+                        string.Format("설치된 서버 확장 모듈 목록 (총 {0}개 — 더블클릭 시 켜기/끄기 전환)", this.InstalledModules.Count),
+                        string.Format("Installed Server Modules ({0} total — Double-click to toggle ON/OFF)", this.InstalledModules.Count)
+                    );
+                    btnAddModuleWizard.Text = Tr("+ 새 모듈 만들기...", "+ Create New Module...");
+                    btnImportModuleFile.Text = Tr("외부 모듈 가져오기...", "Import Module (.txt)...");
+                    btnToggleModule.Text = Tr("✔ 선택 모듈 켜기 / 끄기", "✔ Toggle ON / OFF");
+                    btnDeleteModule.Text = Tr("모듈 삭제", "Delete");
+                    btnOpenModFolder.Text = Tr("폴더 열기", "Folder");
+                    grpModEditor.Text = Tr("선택한 모듈 상세 편집 (버튼 · 명령어 · 작동 서버 즉시 수정)", "Selected Module Live Editor (Buttons, Commands & Target Server)");
+                    btnSaveModEditor.Text = Tr("모듈 저장 및 즉시 적용 (Ctrl+S)", "Save & Apply Module (Ctrl+S)");
+                    refreshModulesUI(currentEditingModFile);
+
+                    // Bottom Bar
+                    lblFooterHint.Text = Tr("설정을 변경한 뒤 [설정 저장 및 적용]을 누르면 settings.ini 및 테마에 영구 저장됩니다.", "Click [Save & Apply Settings] to permanently save to settings.ini and theme files.");
+                    btnSaveAll.Text = Tr("설정 저장 및 적용", "Save & Apply Settings");
+                    btnCloseDlg.Text = Tr("닫기", "Close");
+
+                    suppressEvents = false;
+                };
+
+                cbLang.SelectedIndexChanged += delegate
+                {
+                    if (suppressEvents) return;
+                    SetLanguage(cbLang.SelectedIndex == 1 ? "en" : "ko", true);
+                    refreshSettingsLanguage();
+                };
+
+                chkAlwaysOnTop.CheckedChanged += delegate
+                {
+                    if (suppressEvents) return;
+                    this.TopMost = chkAlwaysOnTop.Checked;
+                    if (this.btnPinTop != null)
+                    {
+                        this.btnPinTop.Text = this.TopMost ? Tr("[고정됨]", "[Pinned]") : Tr("창고정", "Pin Top");
+                    }
+                    SetIniValue("Window", "AlwaysOnTop", this.TopMost ? "true" : "false", true);
+                };
+
+                cbActiveTheme.SelectedIndexChanged += delegate
+                {
+                    if (suppressEvents || cbActiveTheme.SelectedItem == null) return;
+                    string selTheme = Convert.ToString(cbActiveTheme.SelectedItem);
+                    SetIniValue("Theme", "ActiveTheme", selTheme, true);
+                    LoadThemeFile(selTheme);
+                    ApplyThemeColorsToUI();
+                    ApplyWindowTitleBarTheme(dlg);
+                    RedrawActiveChatHistory();
+                    refreshSlotListLabels();
+                };
+
+                cbFName.SelectedIndexChanged += delegate { applyLivePreview(); };
+                numFSize.ValueChanged += delegate { applyLivePreview(); };
+                cbFWeight.SelectedIndexChanged += delegate { applyLivePreview(); };
+                chkShowTs.CheckedChanged += delegate { applyLivePreview(); };
+                numWinOpacity.ValueChanged += delegate { applyLivePreview(); };
+
+                btnSaveAll.Click += delegate
+                {
+                    // 1. General & Language
+                    string chosenLang = cbLang.SelectedIndex == 1 ? "en" : "ko";
+                    SetLanguage(chosenLang, false);
+
+                    // 2. Profile & Nickname
+                    string newNick = txtNick.Text.Trim();
+                    if (!string.IsNullOrEmpty(newNick))
+                    {
+                        bool nickChanged = !string.Equals(this.GlobalNickname, newNick, StringComparison.Ordinal);
+                        this.GlobalNickname = newNick;
+                        SetIniValue("User", "DefaultNickname", newNick, false);
+                        if (chkApplyNickLive.Checked && nickChanged)
+                        {
+                            foreach (NyaaServerSession sess in this.Sessions.Values)
+                            {
+                                if (sess.IsConnected)
+                                {
+                                    sess.MyNickname = newNick;
+                                    sess.Emit("change_nickname", new Dictionary<string, object>
+                                    {
+                                        { "roomId", this.ActiveRoomId },
+                                        { "newNickname", newNick }
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    SetIniValue("User", "QuitMessage", txtQuitMsg.Text.Trim(), false);
+                    SetIniValue("User", "UserId", this.GlobalUserId, false);
+
+                    // 3. Server Connection
+                    if (!string.IsNullOrEmpty(txtSrvUrl.Text.Trim()))
+                    {
+                        SetIniValue("Server", "Url", NormalizeUrl(txtSrvUrl.Text.Trim()), false);
+                    }
+                    string defCh = txtDefChan.Text.Trim();
+                    if (!string.IsNullOrEmpty(defCh))
+                    {
+                        if (!defCh.StartsWith("#")) defCh = "#" + defCh;
+                        SetIniValue("Server", "DefaultChannel", defCh, false);
+                    }
+                    SetIniValue("Server", "AutoConnect", chkAutoConnect.Checked ? "true" : "false", false);
+                    SetIniValue("Server", "ExtraServers", txtExtraSrvs.Text.Trim(), false);
+                    SetIniValue("Server", "AutoConnectServers", txtExtraSrvs.Text.Trim(), false);
+
+                    // 3-1. Auto-Join Rules (Per-Server Channels)
+                    Dictionary<string, string> ajMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    string[] ajLines = (txtAutoJoinRules.Text ?? "").Split(new string[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+                    foreach (string rawLine in ajLines)
+                    {
+                        string line = rawLine.Trim();
+                        if (string.IsNullOrEmpty(line) || line.StartsWith(";") || line.StartsWith("#")) continue;
+                        int eqIdx = line.IndexOf('=');
+                        if (eqIdx > 0)
+                        {
+                            string srvKey = line.Substring(0, eqIdx).Trim();
+                            string chList = line.Substring(eqIdx + 1).Trim();
+                            if (!string.IsNullOrEmpty(srvKey) && !string.IsNullOrEmpty(chList))
+                            {
+                                ajMap[srvKey] = chList;
+                            }
+                        }
+                    }
+                    if (this.IniData == null)
+                    {
+                        this.IniData = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+                    }
+                    this.IniData["AutoJoin"] = ajMap;
+
+                    // 4. Window & Layout
+                    if (!string.IsNullOrEmpty(txtWinTitle.Text.Trim()))
+                    {
+                        this.Text = txtWinTitle.Text.Trim();
+                        SetIniValue("Window", "Title", this.Text, false);
+                    }
+                    this.TopMost = chkAlwaysOnTop.Checked;
+                    SetIniValue("Window", "AlwaysOnTop", this.TopMost ? "true" : "false", false);
+                    SetIniValue("Window", "MinimizeToTrayOnClose", chkMinToTray.Checked ? "true" : "false", false);
+                    ApplyHardwareSafeOpacity((int)numWinOpacity.Value);
+                    SetIniValue("Window", "Opacity", Convert.ToString((int)numWinOpacity.Value), false);
+                    SetIniValue("Window", "LeftPanelWidth", Convert.ToString((int)numLeftWidth.Value), false);
+                    SetIniValue("Window", "RightPanelWidth", Convert.ToString((int)numRightWidth.Value), false);
+                    ApplyDefaultSplitters();
+
+                    // 5. Theme & Font
+                    string themeFile = cbActiveTheme.SelectedItem != null ? Convert.ToString(cbActiveTheme.SelectedItem) : GetIni("Theme", "ActiveTheme", "default_dark.ini");
+                    string fName = cbFName.SelectedItem != null ? Convert.ToString(cbFName.SelectedItem) : this.CurrentFontName;
+                    int fSize = (int)numFSize.Value;
+                    string fWeight = cbFWeight.SelectedIndex == 1 ? "bold" : (cbFWeight.SelectedIndex == 2 ? "light" : "normal");
+
+                    RebuildChatFonts(fName, fSize, fWeight);
+                    SetIniValue("Theme", "ActiveTheme", themeFile, false);
+                    SetIniValue("Theme", "FontFamily", fName, false);
+                    SetIniValue("Theme", "FontSize", Convert.ToString(fSize), false);
+                    SetIniValue("Theme", "FontWeight", fWeight, false);
+                    SetIniValue("Theme", "ShowTimestamps", chkShowTs.Checked ? "true" : "false", false);
+
+                    try { writeThemeIniFile(themeFile); } catch { }
+
+                    // 6. Security, Logging & Sounds
+                    SetIniValue("Security", "SkipLinkWarning", chkWarnExternalLinks.Checked ? "false" : "true", false);
+                    SetIniValue("Logging", "SaveLogs", chkSaveLogs.Checked ? "true" : "false", false);
+                    SetIniValue("Sounds", "EnableSounds", chkEnableSounds.Checked ? "true" : "false", false);
+                    SetIniValue("Sounds", "UseSystemBeepFallback", chkBeepFallback.Checked ? "true" : "false", false);
+                    for (int i = 0; i < 4; i++)
+                    {
+                        string wavVal = sndCombos[i].SelectedIndex > 0 ? Convert.ToString(sndCombos[i].SelectedItem) : "";
+                        SetIniValue("Sounds", sndKeys[i], wavVal, i == 3);
+                    }
+
+                    RefreshThemeDropdown();
+                    ApplyThemeColorsToUI();
+                    ApplyLanguageToUI();
+                    UpdateHeaderAndModuleBar();
+                    RedrawActiveChatHistory();
+
+                    MessageBox.Show(
+                        Tr("모든 설정이 저장되고 즉시 반영되었습니다.", "All settings have been saved and applied immediately."),
+                        Tr("설정 저장 완료", "Settings Saved"),
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information
+                    );
+                };
+
+                dlg.Controls.Add(contentHost);
+                dlg.Controls.Add(leftNavPanel);
+                dlg.Controls.Add(bottomBar);
+
+                refreshSettingsLanguage();
+                loadFileIntoEditor(currentRelPath);
+                switchPage(activePageIdx);
+
                 dlg.ShowDialog(this);
             }
         }
@@ -3812,6 +8242,11 @@ namespace NyaaChatNative
                 e.SuppressKeyPress = true;
                 OpenServerListExplorer();
             }
+            else if (e.KeyCode == Keys.F10)
+            {
+                e.SuppressKeyPress = true;
+                OpenIntegratedSettingsDialog(0);
+            }
             else if (e.Alt && e.KeyCode == Keys.R)
             {
                 e.SuppressKeyPress = true;
@@ -3847,24 +8282,39 @@ namespace NyaaChatNative
         private void InitTrayIcon()
         {
             this.trayMenu = new ContextMenuStrip();
-            this.trayMenu.Items.Add("창 열기 / 숨기기 (Alt+Q)", null, delegate { ToggleWindowVisibility(); });
-            this.trayMenu.Items.Add("서버 리스트 탐색 (F2)", null, delegate { OpenServerListExplorer(); });
-            this.trayMenu.Items.Add("스크립트 편집기 (Alt+R)", null, delegate { OpenScriptEditorDialog("aliases.txt"); });
-            this.trayMenu.Items.Add(new ToolStripSeparator());
-            this.trayMenu.Items.Add("종료 (Exit)", null, delegate
-            {
-                this.isExiting = true;
-                Application.Exit();
-            });
-
             this.trayIcon = new NotifyIcon
             {
                 Icon = this.Icon,
-                Text = "Nyaa Chat Native Multi-Server (Alt+Q: 숨김)",
+                Text = "Nyaa Chat Native Multi-Server (Alt+Q)",
                 ContextMenuStrip = this.trayMenu,
                 Visible = true
             };
             this.trayIcon.DoubleClick += delegate { ToggleWindowVisibility(); };
+            RebuildTrayMenu();
+        }
+
+        private void RebuildTrayMenu()
+        {
+            if (this.trayMenu == null) return;
+            this.trayMenu.Items.Clear();
+            this.trayMenu.Items.Add(Tr("창 열기 / 숨기기 (Alt+Q)", "Show / Hide Window (Alt+Q)"), null, delegate { ToggleWindowVisibility(); });
+            this.trayMenu.Items.Add(Tr("서버 리스트 탐색 (F2)", "Server List Explorer (F2)"), null, delegate { OpenServerListExplorer(); });
+            this.trayMenu.Items.Add(Tr("설정 (F10 / /settings)", "Settings (F10 / /settings)"), null, delegate { OpenIntegratedSettingsDialog(0); });
+            this.trayMenu.Items.Add(Tr("색상/글꼴 팔레트 (/theme)", "Colors & Font Palette (/theme)"), null, delegate { OpenThemePaletteDialog(); });
+            this.trayMenu.Items.Add(Tr("언어 전환: 한국어 <-> English (/lang)", "Switch Language: KO <-> EN (/lang)"), null, delegate { SetLanguage(this.IsEnglish ? "ko" : "en", true); });
+            this.trayMenu.Items.Add(Tr("스크립트 편집기 (Alt+R)", "Script Editor (Alt+R)"), null, delegate { OpenScriptEditorDialog("aliases.txt"); });
+            this.trayMenu.Items.Add(Tr(">_ 파워쉘 터미널 (/ps)", ">_ PowerShell Terminal (/ps)"), null, delegate { SwitchToTerminalModule(null); });
+            this.trayMenu.Items.Add(Tr("모듈 추가 · 관리 (/modules)", "Modules Manager (/modules)"), null, delegate { OpenModulesManagerDialog(); });
+            this.trayMenu.Items.Add(new ToolStripSeparator());
+            this.trayMenu.Items.Add(Tr("종료 (Exit)", "Exit"), null, delegate
+            {
+                this.isExiting = true;
+                Application.Exit();
+            });
+            if (this.trayIcon != null)
+            {
+                this.trayIcon.Text = Tr("Nyaa Chat 네이티브 클라이언트 (Alt+Q: 숨김)", "Nyaa Chat Native Client (Alt+Q: Boss Key)");
+            }
         }
 
         private Icon LoadOrCreateIcon()
@@ -3916,6 +8366,7 @@ namespace NyaaChatNative
                 return;
             }
             try { UnregisterHotKey(this.Handle, HOTKEY_ID_BOSS); } catch { }
+            StopPowerShellSession();
             foreach (NyaaServerSession s in this.Sessions.Values) s.Disconnect();
             if (this.trayIcon != null)
             {
@@ -4061,16 +8512,20 @@ namespace NyaaChatNative
         public ServerListForm(MainForm owner)
         {
             this.mainForm = owner;
-            this.Text = "Nyaa Chat 네트워크 서버 리스트 & 공개 채널 탐색기 (F2)";
+            this.Text = owner.Tr("Nyaa Chat 네트워크 서버 리스트 & 공개 채널 탐색기 (F2)", "Nyaa Chat Network Server Directory & Public Channel Explorer (F2)");
             this.Size = new Size(780, 560);
             this.StartPosition = FormStartPosition.CenterParent;
             this.BackColor = owner.ColBgWindow;
             this.ForeColor = owner.ColTextPrimary;
+            owner.ApplyWindowTitleBarTheme(this);
 
             Label lblTopGuide = new Label
             {
-                Text = "[사용법] 1. 위쪽 목록에서 서버를 선택하거나 더블클릭하면 아래에 해당 서버의 공개 채널 목록이 표시됩니다.\r\n" +
-                       "         2. 아래쪽 채널을 더블클릭하면 현재 서버 연결을 유지한 채 해당 서버 채널로 동시 접속합니다.",
+                Text = owner.Tr(
+                    "[사용법] 1. 위쪽 목록에서 서버를 선택하거나 더블클릭하면 아래에 해당 서버의 공개 채널 목록이 표시됩니다.\r\n" +
+                    "         2. 아래쪽 채널을 더블클릭하면 현재 서버 연결을 유지한 채 해당 서버 채널로 동시 접속합니다.",
+                    "[Guide] 1. Select or double-click a server in the upper list to view its public channels below.\r\n" +
+                    "        2. Double-click any channel below to connect simultaneously without leaving your current server."),
                 Location = new Point(14, 10),
                 Size = new Size(620, 36),
                 Font = new Font("맑은 고딕", 9f, FontStyle.Bold),
@@ -4079,7 +8534,7 @@ namespace NyaaChatNative
 
             Button btnRefresh = new Button
             {
-                Text = "서버목록 갱신",
+                Text = owner.Tr("서버목록 갱신", "Refresh List"),
                 Location = new Point(638, 12),
                 Size = new Size(114, 30),
                 FlatStyle = FlatStyle.Flat,
@@ -4107,12 +8562,12 @@ namespace NyaaChatNative
                 ForeColor = owner.ColTextPrimary,
                 Font = new Font("맑은 고딕", 9.5f)
             };
-            this.lvServers.Columns.Add("서버 이름", 160);
-            this.lvServers.Columns.Add("서버 주소 (Host)", 190);
-            this.lvServers.Columns.Add("상태", 95);
-            this.lvServers.Columns.Add("접속자", 65);
-            this.lvServers.Columns.Add("공개채널", 70);
-            this.lvServers.Columns.Add("프로토콜 / 설명", 145);
+            this.lvServers.Columns.Add(owner.Tr("서버 이름", "Server Name"), 160);
+            this.lvServers.Columns.Add(owner.Tr("서버 주소 (Host)", "Server Host"), 190);
+            this.lvServers.Columns.Add(owner.Tr("상태", "Status"), 95);
+            this.lvServers.Columns.Add(owner.Tr("접속자", "Users"), 65);
+            this.lvServers.Columns.Add(owner.Tr("공개채널", "Channels"), 70);
+            this.lvServers.Columns.Add(owner.Tr("프로토콜 / 설명", "Protocol / Info"), 145);
 
             this.lvServers.SelectedIndexChanged += delegate
             {
@@ -4133,7 +8588,9 @@ namespace NyaaChatNative
 
             this.lblSelectedServerTitle = new Label
             {
-                Text = "선택한 서버의 공개 채널 목록 (채널을 더블클릭하면 즉시 동시 접속합니다):",
+                Text = owner.Tr(
+                    "선택한 서버의 공개 채널 목록 (채널을 더블클릭하면 즉시 동시 접속합니다):",
+                    "Public channels on the selected server (double-click any channel to connect simultaneously):"),
                 Location = new Point(14, 246),
                 AutoSize = true,
                 Font = new Font("맑은 고딕", 9.5f, FontStyle.Bold),
@@ -4151,10 +8608,10 @@ namespace NyaaChatNative
                 ForeColor = owner.ColTextPrimary,
                 Font = new Font("맑은 고딕", 9.5f)
             };
-            this.lvChannels.Columns.Add("채널명", 170);
-            this.lvChannels.Columns.Add("참여자 수", 80);
-            this.lvChannels.Columns.Add("모드", 75);
-            this.lvChannels.Columns.Add("채널 토픽 (주제)", 395);
+            this.lvChannels.Columns.Add(owner.Tr("채널명", "Channel"), 170);
+            this.lvChannels.Columns.Add(owner.Tr("참여자 수", "Users"), 80);
+            this.lvChannels.Columns.Add(owner.Tr("모드", "Modes"), 75);
+            this.lvChannels.Columns.Add(owner.Tr("채널 토픽 (주제)", "Channel Topic"), 395);
 
             this.lvChannels.DoubleClick += delegate
             {
@@ -4176,7 +8633,7 @@ namespace NyaaChatNative
                 Size = new Size(738, 42),
                 BackColor = owner.ColBgHeader
             };
-            Label lDirect = new Label { Text = "직접 서버/채널 입력 접속:", Location = new Point(10, 12), AutoSize = true };
+            Label lDirect = new Label { Text = owner.Tr("직접 서버/채널 입력 접속:", "Direct Server/Channel:"), Location = new Point(10, 12), AutoSize = true };
             this.txtDirectUrl = new TextBox
             {
                 Text = owner.ActiveSession != null ? owner.ActiveSession.ServerUrl : "https://nemulo.duckdns.org",
@@ -4195,7 +8652,7 @@ namespace NyaaChatNative
             };
             Button btnDirectGo = new Button
             {
-                Text = "이 서버/채널로 동시 접속",
+                Text = owner.Tr("이 서버/채널로 동시 접속", "Connect Simultaneously"),
                 Location = new Point(556, 7),
                 Size = new Size(172, 28),
                 FlatStyle = FlatStyle.Flat,
@@ -4234,7 +8691,7 @@ namespace NyaaChatNative
 
                     DirectoryServerEntry entry = new DirectoryServerEntry
                     {
-                        ServerName = d.ContainsKey("serverName") ? Convert.ToString(d["serverName"]) : "서버",
+                        ServerName = d.ContainsKey("serverName") ? Convert.ToString(d["serverName"]) : this.mainForm.Tr("서버", "Server"),
                         ServerUrl = Convert.ToString(d["serverUrl"]),
                         Host = d.ContainsKey("host") ? Convert.ToString(d["host"]) : MainForm.ExtractHost(Convert.ToString(d["serverUrl"])),
                         Protocol = d.ContainsKey("protocol") ? Convert.ToString(d["protocol"]) : "nyaa-core-v1",
@@ -4275,12 +8732,12 @@ namespace NyaaChatNative
 
             foreach (DirectoryServerEntry srv in this.currentServers)
             {
-                string st = srv.IsOnline ? "온라인" : "캐시보관";
+                string st = srv.IsOnline ? this.mainForm.Tr("온라인", "Online") : this.mainForm.Tr("캐시보관", "Cached");
                 ListViewItem item = new ListViewItem(srv.ServerName);
                 item.SubItems.Add(srv.Host);
                 item.SubItems.Add(st);
-                item.SubItems.Add(srv.UserCount + "명");
-                item.SubItems.Add(srv.PublicChannels.Count + "개");
+                item.SubItems.Add(this.mainForm.IsEnglish ? (srv.UserCount + "") : (srv.UserCount + "명"));
+                item.SubItems.Add(this.mainForm.IsEnglish ? (srv.PublicChannels.Count + "") : (srv.PublicChannels.Count + "개"));
                 item.SubItems.Add(srv.Protocol + (string.IsNullOrEmpty(srv.Description) ? "" : " - " + srv.Description));
                 item.Tag = srv;
                 this.lvServers.Items.Add(item);
@@ -4299,9 +8756,9 @@ namespace NyaaChatNative
         {
             this.selectedServer = srv;
             this.txtDirectUrl.Text = srv.ServerUrl;
-            this.lblSelectedServerTitle.Text = string.Format(
-                "[{0} ({1})] 공개 채널 목록 ({2}개) — 채널을 더블클릭하면 새 서버 창으로 동시 접속합니다:",
-                srv.ServerName, srv.Host, srv.PublicChannels.Count
+            this.lblSelectedServerTitle.Text = this.mainForm.Tr(
+                string.Format("[{0} ({1})] 공개 채널 목록 ({2}개) — 채널을 더블클릭하면 새 서버 창으로 동시 접속합니다:", srv.ServerName, srv.Host, srv.PublicChannels.Count),
+                string.Format("[{0} ({1})] Public Channels ({2}) — Double-click any channel to connect simultaneously:", srv.ServerName, srv.Host, srv.PublicChannels.Count)
             );
 
             this.lvChannels.BeginUpdate();
@@ -4310,9 +8767,9 @@ namespace NyaaChatNative
             foreach (ChannelItemInfo ch in srv.PublicChannels)
             {
                 ListViewItem item = new ListViewItem(ch.Name + (ch.HasKey ? " [+k]" : ""));
-                item.SubItems.Add(ch.UserCount + "명");
+                item.SubItems.Add(this.mainForm.IsEnglish ? (ch.UserCount + "") : (ch.UserCount + "명"));
                 item.SubItems.Add(ch.Modes);
-                item.SubItems.Add(string.IsNullOrEmpty(ch.Topic) ? "(설정된 토픽 없음)" : ch.Topic);
+                item.SubItems.Add(string.IsNullOrEmpty(ch.Topic) ? this.mainForm.Tr("(설정된 토픽 없음)", "(No topic set)") : ch.Topic);
                 item.Tag = ch;
                 this.lvChannels.Items.Add(item);
             }

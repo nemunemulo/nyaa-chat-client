@@ -1,0 +1,24 @@
+﻿; ============================================================================
+; Nyaa Chat 로컬 터미널 확장 모듈: powershell_module.txt (Windows PowerShell)
+; ============================================================================
+; - Type=Terminal 로 설정된 모듈은 좌측 하단 [파워쉘 / 터미널] 영역에 표시됩니다.
+; - 클릭하면 중앙 화면이 대화형 PowerShell 콘솔로 전환되며 세션이 유지됩니다.
+; - 좌측 상단의 채팅 채널(#자유대화 등)을 클릭하면 언제든 채팅 화면으로 돌아갑니다.
+; ============================================================================
+
+[Module]
+Id=PowerShell
+Name=파워쉘 (PowerShell)
+Version=1.0
+Enabled=false
+Type=Terminal
+ShellExe=powershell.exe
+TargetServer=*
+Description=클라이언트 내장 대화형 Windows PowerShell 콘솔 모듈
+
+[Buttons]
+현재경로 (pwd) = Get-Location
+파일목록 (dir) = Get-ChildItem
+IP확인 (ipconfig) = ipconfig
+프로세스 (ps) = Get-Process | Select-Object -First 20 Name, Id, CPU, WS | Format-Table -AutoSize
+탐색기 열기 = explorer .
