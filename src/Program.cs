@@ -1309,23 +1309,6 @@ namespace NyaaChatNative
             };
             this.treeServersChannels.NodeMouseClick += OnTreeServersNodeClick;
             this.treeServersChannels.NodeMouseDoubleClick += OnTreeServersNodeDoubleClick;
-            this.treeServersChannels.MouseDown += delegate(object s, MouseEventArgs e)
-            {
-                if (e.Button == MouseButtons.Middle)
-                {
-                    TreeNode n = this.treeServersChannels.GetNodeAt(e.Location);
-                    if (n != null)
-                    {
-                        object[] tag = n.Tag as object[];
-                        if (tag != null && tag.Length >= 3 && Convert.ToString(tag[0]) == "channel")
-                        {
-                            NyaaServerSession sess = tag[1] as NyaaServerSession;
-                            string roomId = Convert.ToString(tag[2]);
-                            if (sess != null) LeaveChannel(sess, roomId);
-                        }
-                    }
-                }
-            };
 
             ContextMenuStrip treeMenu = new ContextMenuStrip();
             treeMenu.Opening += OnTreeContextMenuOpening;
@@ -3085,16 +3068,6 @@ namespace NyaaChatNative
             string kind = Convert.ToString(tag[0]);
             NyaaServerSession s = tag[1] as NyaaServerSession;
             if (s == null) return;
-
-            if (e.Button == MouseButtons.Middle)
-            {
-                if (kind == "channel" && tag.Length >= 3)
-                {
-                    string roomId = Convert.ToString(tag[2]);
-                    LeaveChannel(s, roomId);
-                    return;
-                }
-            }
 
             if (e.Button == MouseButtons.Right)
             {
