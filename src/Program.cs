@@ -140,6 +140,8 @@ namespace NyaaChatNative
         public bool ManualDisconnect = false;
         public int ReconnectAttempts = 0;
         public bool IsReconnecting = false;
+        public int PingMs = -1;
+        private System.Threading.Timer pingTimer;
 
         public Dictionary<string, ChannelItemInfo> Channels = new Dictionary<string, ChannelItemInfo>(StringComparer.OrdinalIgnoreCase);
         public List<OnlineUserInfo> OnlineUsers = new List<OnlineUserInfo>();
@@ -321,6 +323,41 @@ namespace NyaaChatNative
             }
         }
 
+        public void StartPingTimer()
+        {
+            StopPingTimer();
+            try
+            {
+                this.pingTimer = new System.Threading.Timer(delegate(object state)
+                {
+                    try
+                    {
+                        if (this.IsConnected && this.ws != null && this.ws.State == WebSocketState.Open)
+                        {
+                            Dictionary<string, object> p = new Dictionary<string, object>();
+                            p["t"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                            Emit("client_ping", p);
+                        }
+                    }
+                    catch { }
+                }, null, 1000, 10000);
+            }
+            catch { }
+        }
+
+        public void StopPingTimer()
+        {
+            try
+            {
+                if (this.pingTimer != null)
+                {
+                    this.pingTimer.Dispose();
+                    this.pingTimer = null;
+                }
+            }
+            catch { }
+        }
+
         public void Emit(string eventName, object payload)
         {
             try
@@ -365,6 +402,8 @@ namespace NyaaChatNative
         {
             if (manual) this.ManualDisconnect = true;
             this.IsConnected = false;
+            StopPingTimer();
+            this.PingMs = -1;
             try
             {
                 if (this.cts != null) this.cts.Cancel();
@@ -808,12 +847,22 @@ namespace NyaaChatNative
         private Label lblChannelSubTopic;
         private Button btnChannelTopicEdit;
         private Button btnReport112;
+        private Button btnSplitToggle;
         private Button btnTermClear;
         private Button btnTermRestart;
         private Button btnTermBackToChat;
 
         private FlowLayoutPanel serverExtModuleBar;
+        private SplitContainer chatSplitView;
         private RichTextBox rtbChat;
+        private RichTextBox rtbSplitChat;
+        private Panel splitHeaderBar;
+        private Label lblSplitTitle;
+        private Button btnCloseSplit;
+        public bool IsSplitViewActive = false;
+        public NyaaServerSession SplitSession = null;
+        public string SplitRoomId = "";
+
         private RichTextBox rtbTerminal;
         private Panel inputBottomPanel;
         private ChatInputTextBox txtInput;
@@ -1705,6 +1754,19 @@ namespace NyaaChatNative
             };
             this.btnReport112.Click += delegate { ExecuteSlashCommand("/112"); };
 
+            this.btnSplitToggle = new Button
+            {
+                Text = "듀얼 뷰",
+                Size = new Size(76, 24),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                Location = new Point(494, 12),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("맑은 고딕", 8.3f, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            this.btnSplitToggle.FlatAppearance.BorderSize = 1;
+            this.btnSplitToggle.Click += delegate { ToggleSplitView(); };
+
             this.btnTermClear = new Button
             {
                 Text = "화면 지우기",
@@ -1761,7 +1823,7 @@ namespace NyaaChatNative
 
             this.channelHeaderBar.Controls.AddRange(new Control[] {
                 this.lblChannelTopicHeader, this.lblChannelSubTopic,
-                this.btnChannelTopicEdit, this.btnReport112,
+                this.btnChannelTopicEdit, this.btnReport112, this.btnSplitToggle,
                 this.btnTermClear, this.btnTermRestart, this.btnTermBackToChat
             });
 
@@ -2043,7 +2105,55 @@ namespace NyaaChatNative
                 }
             };
 
-            // Interactive PowerShell / Terminal RichTextBox (shares center view with rtbChat)
+            // Split Chat View (Dual Channel Buffer)
+            this.splitHeaderBar = new Panel { Dock = DockStyle.Top, Height = 28 };
+            this.lblSplitTitle = new Label
+            {
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                AutoEllipsis = true,
+                Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold)
+            };
+            this.btnCloseSplit = new Button
+            {
+                Dock = DockStyle.Right,
+                Width = 28,
+                Text = "✕",
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand
+            };
+            this.btnCloseSplit.FlatAppearance.BorderSize = 0;
+            this.btnCloseSplit.Click += delegate { CloseSplitView(); };
+            this.splitHeaderBar.Controls.Add(this.lblSplitTitle);
+            this.splitHeaderBar.Controls.Add(this.btnCloseSplit);
+
+            this.rtbSplitChat = new RichTextBox
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                BorderStyle = BorderStyle.None,
+                ScrollBars = RichTextBoxScrollBars.Vertical,
+                DetectUrls = true,
+                HideSelection = false
+            };
+            this.rtbSplitChat.LinkClicked += delegate (object s, LinkClickedEventArgs e)
+            {
+                HandleChatLinkClicked(e.LinkText);
+            };
+
+            this.chatSplitView = new SplitContainer
+            {
+                Dock = DockStyle.Fill,
+                Orientation = Orientation.Vertical,
+                SplitterWidth = 5,
+                Panel2Collapsed = true
+            };
+            this.chatSplitView.Panel1.Controls.Add(this.rtbChat);
+            this.chatSplitView.Panel2.Controls.Add(this.rtbSplitChat);
+            this.chatSplitView.Panel2.Controls.Add(this.splitHeaderBar);
+            this.splitHeaderBar.BringToFront();
+
+            // Interactive PowerShell / Terminal RichTextBox (shares center view with chatSplitView)
             this.rtbTerminal = new RichTextBox
             {
                 Dock = DockStyle.Fill,
@@ -2059,7 +2169,7 @@ namespace NyaaChatNative
             };
 
             this.rightInnerSplit.Panel1.Controls.Add(this.rtbTerminal);
-            this.rightInnerSplit.Panel1.Controls.Add(this.rtbChat);
+            this.rightInnerSplit.Panel1.Controls.Add(this.chatSplitView);
             this.rightInnerSplit.Panel1.Controls.Add(this.serverExtModuleBar);
             this.rightInnerSplit.Panel1.Controls.Add(this.inputBottomPanel);
             this.rightInnerSplit.Panel1.Controls.Add(this.pnlSearch);
@@ -2191,6 +2301,7 @@ namespace NyaaChatNative
 
             this.btnChannelTopicEdit.Text = Tr("토픽/모드", "Topic/Mode");
             this.btnReport112.Text = Tr("신고(/112)", "Report");
+            if (this.btnSplitToggle != null) this.btnSplitToggle.Text = this.IsSplitViewActive ? Tr("단일 뷰", "Single View") : Tr("듀얼 뷰", "Split View");
             if (this.btnTermClear != null) this.btnTermClear.Text = Tr("화면 지우기", "Clear");
             if (this.btnTermRestart != null) this.btnTermRestart.Text = Tr("세션 재시작", "Restart");
             if (this.btnTermBackToChat != null) this.btnTermBackToChat.Text = Tr("채팅 복귀", "To Chat");
@@ -2376,6 +2487,33 @@ namespace NyaaChatNative
             this.btnReport112.BackColor = this.ColBgSidebar;
             this.btnReport112.FlatAppearance.BorderColor = Color.FromArgb(239, 68, 68);
 
+            if (this.btnSplitToggle != null)
+            {
+                this.btnSplitToggle.BackColor = this.IsSplitViewActive ? this.ColAccent : this.ColBgSidebar;
+                this.btnSplitToggle.ForeColor = this.IsSplitViewActive ? Color.White : this.ColTextPrimary;
+                this.btnSplitToggle.FlatAppearance.BorderColor = this.IsSplitViewActive ? this.ColAccent : this.ColBorder;
+            }
+            if (this.splitHeaderBar != null)
+            {
+                this.splitHeaderBar.BackColor = this.ColBgHeader;
+            }
+            if (this.lblSplitTitle != null)
+            {
+                this.lblSplitTitle.ForeColor = this.ColTextPrimary;
+            }
+            if (this.btnCloseSplit != null)
+            {
+                this.btnCloseSplit.BackColor = this.ColBgHeader;
+                this.btnCloseSplit.ForeColor = this.ColTextSecondary;
+                this.btnCloseSplit.FlatAppearance.BorderColor = this.ColBorder;
+            }
+            if (this.rtbSplitChat != null)
+            {
+                this.rtbSplitChat.BackColor = this.ColBgChat;
+                this.rtbSplitChat.ForeColor = this.ColTextPrimary;
+                this.rtbSplitChat.Font = this.ChatFont;
+            }
+
             if (this.btnTermClear != null)
             {
                 this.btnTermClear.BackColor = this.ColBgSidebar;
@@ -2468,16 +2606,37 @@ namespace NyaaChatNative
             if (this.channelHeaderBar == null) return;
             if (this.IsTerminalViewActive && this.btnTermBackToChat != null)
             {
+                if (this.btnSplitToggle != null) this.btnSplitToggle.Visible = false;
+                if (this.btnReport112 != null) this.btnReport112.Visible = false;
+                if (this.btnChannelTopicEdit != null) this.btnChannelTopicEdit.Visible = false;
                 this.btnTermBackToChat.Left = this.channelHeaderBar.Width - this.btnTermBackToChat.Width - 10;
                 this.btnTermRestart.Left = this.btnTermBackToChat.Left - this.btnTermRestart.Width - 6;
                 this.btnTermClear.Left = this.btnTermRestart.Left - this.btnTermClear.Width - 6;
                 this.lblChannelSubTopic.Width = Math.Max(120, this.btnTermClear.Left - this.lblChannelSubTopic.Left - 10);
             }
-            else if (this.btnReport112 != null && this.btnChannelTopicEdit != null)
+            else
             {
-                this.btnReport112.Left = this.channelHeaderBar.Width - this.btnReport112.Width - 10;
-                this.btnChannelTopicEdit.Left = this.btnReport112.Left - this.btnChannelTopicEdit.Width - 6;
-                this.lblChannelSubTopic.Width = Math.Max(120, this.btnChannelTopicEdit.Left - this.lblChannelSubTopic.Left - 10);
+                if (this.btnSplitToggle != null) this.btnSplitToggle.Visible = true;
+                if (this.btnReport112 != null) this.btnReport112.Visible = true;
+                if (this.btnChannelTopicEdit != null) this.btnChannelTopicEdit.Visible = true;
+
+                int rightPos = this.channelHeaderBar.Width - 10;
+                if (this.btnSplitToggle != null)
+                {
+                    this.btnSplitToggle.Left = rightPos - this.btnSplitToggle.Width;
+                    rightPos = this.btnSplitToggle.Left - 6;
+                }
+                if (this.btnReport112 != null)
+                {
+                    this.btnReport112.Left = rightPos - this.btnReport112.Width;
+                    rightPos = this.btnReport112.Left - 6;
+                }
+                if (this.btnChannelTopicEdit != null)
+                {
+                    this.btnChannelTopicEdit.Left = rightPos - this.btnChannelTopicEdit.Width;
+                    rightPos = this.btnChannelTopicEdit.Left - 6;
+                }
+                this.lblChannelSubTopic.Width = Math.Max(120, rightPos - this.lblChannelSubTopic.Left - 10);
             }
         }
 
@@ -2811,12 +2970,15 @@ namespace NyaaChatNative
                 }
             }
             session.IsReconnecting = false;
+            session.StartPingTimer();
             UpdateConnectionBadge();
             RefreshLeftServerTree();
         }
 
         public void OnSessionDisconnected(NyaaServerSession session)
         {
+            session.StopPingTimer();
+            session.PingMs = -1;
             UpdateConnectionBadge();
             RefreshLeftServerTree();
         }
@@ -2854,6 +3016,23 @@ namespace NyaaChatNative
         public void OnSessionSocketEvent(NyaaServerSession session, string eventName, object dataObj)
         {
             Dictionary<string, object> data = dataObj as Dictionary<string, object>;
+
+            if (eventName == "server_pong")
+            {
+                try
+                {
+                    if (data != null && data.ContainsKey("t"))
+                    {
+                        long sentTime = Convert.ToInt64(data["t"]);
+                        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        int rtt = (int)Math.Max(0, now - sentTime);
+                        session.PingMs = rtt;
+                        UpdateSessionPingInTree(session);
+                    }
+                }
+                catch { }
+                return;
+            }
 
             if (eventName == "init_state" && data != null)
             {
@@ -3409,6 +3588,17 @@ namespace NyaaChatNative
                 session.UnreadCounts[roomId] = prev + 1;
                 RefreshLeftServerTree();
             }
+
+            // Also append to split view if active and matching split channel
+            if (this.IsSplitViewActive && this.SplitSession == session && string.Equals(this.SplitRoomId, roomId, StringComparison.OrdinalIgnoreCase))
+            {
+                AppendSingleMessageToTargetRtb(this.rtbSplitChat, item, true, session);
+                if (session.UnreadCounts.ContainsKey(roomId))
+                {
+                    session.UnreadCounts[roomId] = 0;
+                    RefreshLeftServerTree();
+                }
+            }
         }
 
         private long lastOnTextAutoTriggerMs = 0;
@@ -3494,6 +3684,10 @@ namespace NyaaChatNative
             {
                 AppendSingleMessageToRtb(item);
             }
+            if (this.IsSplitViewActive && this.SplitSession == session && string.Equals(this.SplitRoomId, roomId, StringComparison.OrdinalIgnoreCase))
+            {
+                AppendSingleMessageToTargetRtb(this.rtbSplitChat, item, true, session);
+            }
         }
 
         // ====================================================================
@@ -3508,9 +3702,10 @@ namespace NyaaChatNative
             foreach (NyaaServerSession s in this.Sessions.Values)
             {
                 string connIcon = s.IsConnected ? "●" : "○";
+                string pingStr = (s.IsConnected && s.PingMs >= 0) ? string.Format(" [{0}ms]", s.PingMs) : "";
                 string srvLabel = (string.IsNullOrEmpty(s.ServerName) || s.ServerName.Contains("(") || string.Equals(s.ServerName, s.Host, StringComparison.OrdinalIgnoreCase))
-                    ? string.Format("{0} {1}", connIcon, string.IsNullOrEmpty(s.ServerName) ? s.Host : s.ServerName)
-                    : string.Format("{0} {1} ({2})", connIcon, s.ServerName, s.Host);
+                    ? string.Format("{0} {1}{2}", connIcon, string.IsNullOrEmpty(s.ServerName) ? s.Host : s.ServerName, pingStr)
+                    : string.Format("{0} {1} ({2}){3}", connIcon, s.ServerName, s.Host, pingStr);
                 TreeNode srvNode = new TreeNode(srvLabel)
                 {
                     Tag = new object[] { "server", s }
@@ -3563,6 +3758,37 @@ namespace NyaaChatNative
             }
 
             this.treeServersChannels.EndUpdate();
+        }
+
+        public void UpdateSessionPingInTree(NyaaServerSession session)
+        {
+            if (session == null || this.treeServersChannels == null || this.treeServersChannels.IsDisposed) return;
+            try
+            {
+                if (this.InvokeRequired)
+                {
+                    this.BeginInvoke(new Action<NyaaServerSession>(UpdateSessionPingInTree), session);
+                    return;
+                }
+                foreach (TreeNode srvNode in this.treeServersChannels.Nodes)
+                {
+                    object[] tag = srvNode.Tag as object[];
+                    if (tag != null && tag.Length >= 2 && tag[1] == session)
+                    {
+                        string connIcon = session.IsConnected ? "●" : "○";
+                        string pingStr = (session.IsConnected && session.PingMs >= 0) ? string.Format(" [{0}ms]", session.PingMs) : "";
+                        string srvLabel = (string.IsNullOrEmpty(session.ServerName) || session.ServerName.Contains("(") || string.Equals(session.ServerName, session.Host, StringComparison.OrdinalIgnoreCase))
+                            ? string.Format("{0} {1}{2}", connIcon, string.IsNullOrEmpty(session.ServerName) ? session.Host : session.ServerName, pingStr)
+                            : string.Format("{0} {1} ({2}){3}", connIcon, session.ServerName, session.Host, pingStr);
+                        if (srvNode.Text != srvLabel)
+                        {
+                            srvNode.Text = srvLabel;
+                        }
+                        break;
+                    }
+                }
+            }
+            catch { }
         }
 
         private void OnTreeServersNodeClick(object sender, TreeNodeMouseClickEventArgs e)
@@ -3619,7 +3845,12 @@ namespace NyaaChatNative
         {
             this.IsTerminalViewActive = false;
             if (this.rtbTerminal != null) this.rtbTerminal.Visible = false;
-            if (this.rtbChat != null)
+            if (this.chatSplitView != null)
+            {
+                this.chatSplitView.Visible = true;
+                this.chatSplitView.BringToFront();
+            }
+            else if (this.rtbChat != null)
             {
                 this.rtbChat.Visible = true;
                 this.rtbChat.BringToFront();
@@ -3730,6 +3961,13 @@ namespace NyaaChatNative
                 menu.Items.Add(string.Format(Tr("[{0}] 토픽 및 모드 설정 (/topic · /mode)", "[{0}] Topic & Mode (/topic · /mode)"), roomId), null, delegate {
                     SwitchActiveView(s, roomId);
                     PromptEditChannelTopic();
+                });
+                menu.Items.Add(new ToolStripSeparator());
+                menu.Items.Add(string.Format(Tr("[{0}] 듀얼 뷰(화면 분할)로 열기", "[{0}] Open in Split View"), roomId), null, delegate {
+                    OpenSplitView(s, roomId);
+                });
+                menu.Items.Add(string.Format(Tr("[{0}] 대화 내보내기 (HTML / TXT)...", "[{0}] Export Chat Log (HTML / TXT)..."), roomId), null, delegate {
+                    ExportChannelChatLog(s, roomId);
                 });
                 menu.Items.Add(new ToolStripSeparator());
                 menu.Items.Add(Tr("채널명 복사", "Copy Channel Name"), null, delegate {
@@ -4120,6 +4358,7 @@ namespace NyaaChatNative
             this.ActiveTerminalModule = mod;
             this.IsTerminalViewActive = true;
 
+            if (this.chatSplitView != null) this.chatSplitView.Visible = false;
             if (this.rtbChat != null) this.rtbChat.Visible = false;
             if (this.rtbTerminal != null)
             {
@@ -4148,7 +4387,12 @@ namespace NyaaChatNative
             {
                 this.IsTerminalViewActive = false;
                 if (this.rtbTerminal != null) this.rtbTerminal.Visible = false;
-                if (this.rtbChat != null)
+                if (this.chatSplitView != null)
+                {
+                    this.chatSplitView.Visible = true;
+                    this.chatSplitView.BringToFront();
+                }
+                else if (this.rtbChat != null)
                 {
                     this.rtbChat.Visible = true;
                     this.rtbChat.BringToFront();
@@ -4374,6 +4618,7 @@ namespace NyaaChatNative
         {
             if (this.btnChannelTopicEdit != null) this.btnChannelTopicEdit.Visible = !this.IsTerminalViewActive;
             if (this.btnReport112 != null) this.btnReport112.Visible = !this.IsTerminalViewActive;
+            if (this.btnSplitToggle != null) this.btnSplitToggle.Visible = !this.IsTerminalViewActive;
             if (this.btnTermClear != null) this.btnTermClear.Visible = this.IsTerminalViewActive;
             if (this.btnTermRestart != null) this.btnTermRestart.Visible = this.IsTerminalViewActive;
             if (this.btnTermBackToChat != null) this.btnTermBackToChat.Visible = this.IsTerminalViewActive;
@@ -4630,11 +4875,12 @@ namespace NyaaChatNative
             return list;
         }
 
-        public void RedrawActiveChatHistory()
+        public void RedrawActiveChatHistory(bool scrollToBottom = true)
         {
             if (this.rtbChat.IsDisposed) return;
 
             bool handleCreated = this.rtbChat.IsHandleCreated;
+            int prevSelStart = this.rtbChat.SelectionStart;
             if (handleCreated)
             {
                 SendMessage(this.rtbChat.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
@@ -4664,8 +4910,16 @@ namespace NyaaChatNative
                     }
                 }
 
-                this.rtbChat.SelectionStart = this.rtbChat.TextLength;
-                this.rtbChat.ScrollToCaret();
+                if (scrollToBottom)
+                {
+                    this.rtbChat.SelectionStart = this.rtbChat.TextLength;
+                    this.rtbChat.ScrollToCaret();
+                }
+                else
+                {
+                    this.rtbChat.SelectionStart = Math.Min(prevSelStart, this.rtbChat.TextLength);
+                    this.rtbChat.ScrollToCaret();
+                }
             }
             finally
             {
@@ -4680,56 +4934,73 @@ namespace NyaaChatNative
 
         private void AppendSingleMessageToRtb(ChatMessageItem m, bool autoScroll = true)
         {
-            if (this.rtbChat.IsDisposed) return;
+            AppendSingleMessageToTargetRtb(this.rtbChat, m, autoScroll, this.ActiveSession);
+        }
 
-            // Keep RichTextBox buffer bounded so long sessions remain at 0ms latency
-            if (autoScroll && this.rtbChat.TextLength > 120000)
+        private void AppendSingleMessageToTargetRtb(RichTextBox targetRtb, ChatMessageItem m, bool autoScroll = true, NyaaServerSession session = null)
+        {
+            if (targetRtb == null || targetRtb.IsDisposed) return;
+
+            // Keep RichTextBox buffer bounded so long sessions remain responsive
+            if (targetRtb.TextLength > 120000)
             {
-                RedrawActiveChatHistory();
-                return;
+                if (autoScroll)
+                {
+                    if (targetRtb == this.rtbChat) RedrawActiveChatHistory(true);
+                    else if (targetRtb == this.rtbSplitChat) RedrawSplitChatHistory(true);
+                    return;
+                }
+                else if (targetRtb.TextLength > 300000)
+                {
+                    // If buffer is excessively large even while user is scrolled up reading backlog,
+                    // trim but preserve user's relative viewport so they are not interrupted.
+                    if (targetRtb == this.rtbChat) RedrawActiveChatHistory(false);
+                    else if (targetRtb == this.rtbSplitChat) RedrawSplitChatHistory(false);
+                    return;
+                }
             }
 
             bool showTs = GetIni("Theme", "ShowTimestamps", "true").ToLower() != "false";
             DateTime dt = DateTimeOffset.FromUnixTimeMilliseconds(m.Timestamp > 0 ? m.Timestamp : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()).ToLocalTime().DateTime;
             string timeStr = string.Format("[{0:HH:mm:ss}] ", dt);
 
-            this.rtbChat.SelectionStart = this.rtbChat.TextLength;
-            this.rtbChat.SelectionLength = 0;
+            targetRtb.SelectionStart = targetRtb.TextLength;
+            targetRtb.SelectionLength = 0;
 
             if (showTs)
             {
-                this.rtbChat.SelectionColor = this.ColTextTimestamp;
-                this.rtbChat.SelectionFont = this.ChatFont;
-                this.rtbChat.AppendText(timeStr);
+                targetRtb.SelectionColor = this.ColTextTimestamp;
+                targetRtb.SelectionFont = this.ChatFont;
+                targetRtb.AppendText(timeStr);
             }
 
             if (m.Type == "system")
             {
-                this.rtbChat.SelectionColor = this.ColTextSystem;
-                this.rtbChat.SelectionFont = this.ChatFont;
-                this.rtbChat.AppendText(m.Content + Environment.NewLine);
+                targetRtb.SelectionColor = this.ColTextSystem;
+                targetRtb.SelectionFont = this.ChatFont;
+                targetRtb.AppendText(m.Content + Environment.NewLine);
             }
             else if (m.Type == "action")
             {
                 Color nickCol = (this.EnableNickColoring && !string.IsNullOrEmpty(m.SenderNick)) ? GetNickColor(m.SenderNick) : this.ColTextAction;
-                this.rtbChat.SelectionColor = nickCol;
-                this.rtbChat.SelectionFont = this.ChatBoldFont;
-                this.rtbChat.AppendText(string.Format("* {0} {1}{2}", m.SenderNick, m.Content, Environment.NewLine));
+                targetRtb.SelectionColor = nickCol;
+                targetRtb.SelectionFont = this.ChatBoldFont;
+                targetRtb.AppendText(string.Format("* {0} {1}{2}", m.SenderNick, m.Content, Environment.NewLine));
             }
             else
             {
-                bool isMe = this.ActiveSession != null && string.Equals(m.SenderId, this.ActiveSession.MyUserId, StringComparison.OrdinalIgnoreCase);
+                bool isMe = session != null && string.Equals(m.SenderId, session.MyUserId, StringComparison.OrdinalIgnoreCase);
                 if (m.IsBot)
                 {
-                    this.rtbChat.SelectionColor = this.ColTextSystem;
-                    this.rtbChat.SelectionFont = this.ChatBoldFont;
-                    this.rtbChat.AppendText("^");
+                    targetRtb.SelectionColor = this.ColTextSystem;
+                    targetRtb.SelectionFont = this.ChatBoldFont;
+                    targetRtb.AppendText("^");
                 }
                 else if (m.IsOp)
                 {
-                    this.rtbChat.SelectionColor = this.ColTextOpBadge;
-                    this.rtbChat.SelectionFont = this.ChatBoldFont;
-                    this.rtbChat.AppendText("@");
+                    targetRtb.SelectionColor = this.ColTextOpBadge;
+                    targetRtb.SelectionFont = this.ChatBoldFont;
+                    targetRtb.AppendText("@");
                 }
 
                 Color nickCol;
@@ -4746,19 +5017,19 @@ namespace NyaaChatNative
                     nickCol = this.ColTextOtherNick;
                 }
 
-                this.rtbChat.SelectionColor = nickCol;
-                this.rtbChat.SelectionFont = this.ChatBoldFont;
-                this.rtbChat.AppendText("<" + m.SenderNick + "> ");
+                targetRtb.SelectionColor = nickCol;
+                targetRtb.SelectionFont = this.ChatBoldFont;
+                targetRtb.AppendText("<" + m.SenderNick + "> ");
 
-                this.rtbChat.SelectionColor = this.ColTextPrimary;
-                this.rtbChat.SelectionFont = this.ChatFont;
-                this.rtbChat.AppendText(m.Content + Environment.NewLine);
+                targetRtb.SelectionColor = this.ColTextPrimary;
+                targetRtb.SelectionFont = this.ChatFont;
+                targetRtb.AppendText(m.Content + Environment.NewLine);
             }
 
             if (autoScroll)
             {
-                this.rtbChat.SelectionStart = this.rtbChat.TextLength;
-                this.rtbChat.ScrollToCaret();
+                targetRtb.SelectionStart = targetRtb.TextLength;
+                targetRtb.ScrollToCaret();
             }
         }
 
@@ -4901,6 +5172,352 @@ namespace NyaaChatNative
             });
         }
 
+        public void OpenSplitView(NyaaServerSession session, string roomId)
+        {
+            if (session == null || string.IsNullOrEmpty(roomId)) return;
+            if (this.chatSplitView == null || this.rtbSplitChat == null) return;
+
+            this.SplitSession = session;
+            this.SplitRoomId = roomId;
+            this.IsSplitViewActive = true;
+
+            this.lblSplitTitle.Text = string.Format(" ⚑ [{0}] {1} " + Tr("(듀얼 뷰)", "(Split View)"), session.ServerName, roomId);
+            this.chatSplitView.Panel2Collapsed = false;
+            try
+            {
+                int halfWidth = Math.Max(100, this.chatSplitView.Width / 2);
+                this.chatSplitView.SplitterDistance = halfWidth;
+            }
+            catch { }
+
+            if (this.btnSplitToggle != null)
+            {
+                this.btnSplitToggle.Text = Tr("단일 뷰", "Single View");
+                this.btnSplitToggle.BackColor = this.ColAccent;
+                this.btnSplitToggle.ForeColor = Color.White;
+                this.btnSplitToggle.FlatAppearance.BorderColor = this.ColAccent;
+            }
+
+            RedrawSplitChatHistory();
+        }
+
+        public void CloseSplitView()
+        {
+            this.IsSplitViewActive = false;
+            this.SplitSession = null;
+            this.SplitRoomId = "";
+
+            if (this.chatSplitView != null)
+            {
+                this.chatSplitView.Panel2Collapsed = true;
+            }
+            if (this.btnSplitToggle != null)
+            {
+                this.btnSplitToggle.Text = Tr("듀얼 뷰", "Split View");
+                this.btnSplitToggle.BackColor = this.ColBgSidebar;
+                this.btnSplitToggle.ForeColor = this.ColTextPrimary;
+                this.btnSplitToggle.FlatAppearance.BorderColor = this.ColBorder;
+            }
+        }
+
+        public void ToggleSplitView()
+        {
+            if (this.IsSplitViewActive)
+            {
+                CloseSplitView();
+            }
+            else
+            {
+                PromptOpenSplitView();
+            }
+        }
+
+        public void PromptOpenSplitView()
+        {
+            List<string> candidateChannels = new List<string>();
+            foreach (NyaaServerSession s in this.Sessions.Values)
+            {
+                foreach (string ch in s.Channels.Keys)
+                {
+                    if (s == this.ActiveSession && string.Equals(ch, this.ActiveRoomId, StringComparison.OrdinalIgnoreCase)) continue;
+                    candidateChannels.Add(string.Format("{0}::{1}", s.Host, ch));
+                }
+            }
+
+            string defaultVal = candidateChannels.Count > 0 ? candidateChannels[0] : (this.ActiveSession != null ? this.ActiveSession.InitialTargetChannel : "#자유대화");
+            string prompt = Tr(
+                "분할 화면(듀얼 뷰)으로 함께 모니터링할 채널을 입력하세요.\n(형식: #채널명  또는  서버주소::#채널명)",
+                "Enter channel to monitor in split view.\n(Format: #channel or host::#channel)"
+            );
+
+            string input = PromptTextInput(Tr("듀얼 뷰(화면 분할) 설정", "Dual Channel Split View"), prompt, defaultVal);
+            if (string.IsNullOrEmpty(input)) return;
+
+            input = input.Trim();
+            NyaaServerSession targetSession = this.ActiveSession;
+            string targetRoom = input;
+
+            if (input.Contains("::"))
+            {
+                string[] parts = input.Split(new string[] { "::" }, 2, StringSplitOptions.None);
+                string srvPrefix = parts[0].Trim();
+                targetRoom = parts[1].Trim();
+                foreach (NyaaServerSession s in this.Sessions.Values)
+                {
+                    if (s.Host.IndexOf(srvPrefix, StringComparison.OrdinalIgnoreCase) >= 0 || s.ServerName.IndexOf(srvPrefix, StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        targetSession = s;
+                        break;
+                    }
+                }
+            }
+
+            if (!targetRoom.StartsWith("#")) targetRoom = "#" + targetRoom;
+            if (targetSession != null)
+            {
+                if (!targetSession.Channels.ContainsKey(targetRoom))
+                {
+                    targetSession.Emit("join_channel", new Dictionary<string, object>
+                    {
+                        { "channelName", targetRoom },
+                        { "key", "" }
+                    });
+                }
+                OpenSplitView(targetSession, targetRoom);
+            }
+        }
+
+        public void RedrawSplitChatHistory(bool scrollToBottom = true)
+        {
+            if (this.rtbSplitChat == null || this.rtbSplitChat.IsDisposed) return;
+            if (this.SplitSession == null || string.IsNullOrEmpty(this.SplitRoomId))
+            {
+                this.rtbSplitChat.Clear();
+                return;
+            }
+
+            int prevSel = this.rtbSplitChat.SelectionStart;
+            bool handleCreated = this.rtbSplitChat.IsHandleCreated;
+            if (handleCreated)
+            {
+                SendMessage(this.rtbSplitChat.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+            }
+            this.rtbSplitChat.SuspendLayout();
+            try
+            {
+                this.rtbSplitChat.Clear();
+                List<ChatMessageItem> history = this.SplitSession.GetOrCreateRoomHistory(this.SplitRoomId);
+                int startIdx = Math.Max(0, history.Count - 200);
+                for (int i = startIdx; i < history.Count; i++)
+                {
+                    AppendSingleMessageToTargetRtb(this.rtbSplitChat, history[i], false, this.SplitSession);
+                }
+                if (scrollToBottom)
+                {
+                    this.rtbSplitChat.SelectionStart = this.rtbSplitChat.TextLength;
+                    this.rtbSplitChat.ScrollToCaret();
+                }
+                else
+                {
+                    this.rtbSplitChat.SelectionStart = Math.Min(prevSel, this.rtbSplitChat.TextLength);
+                    this.rtbSplitChat.ScrollToCaret();
+                }
+            }
+            finally
+            {
+                this.rtbSplitChat.ResumeLayout();
+                if (handleCreated)
+                {
+                    SendMessage(this.rtbSplitChat.Handle, WM_SETREDRAW, new IntPtr(1), IntPtr.Zero);
+                    this.rtbSplitChat.Invalidate();
+                }
+            }
+        }
+
+        private string PromptTextInput(string title, string promptText, string defaultValue)
+        {
+            using (Form dlg = new Form())
+            {
+                dlg.Text = title;
+                dlg.Size = new Size(420, 210);
+                dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dlg.StartPosition = FormStartPosition.CenterParent;
+                dlg.MaximizeBox = false;
+                dlg.MinimizeBox = false;
+                dlg.BackColor = this.ColBgWindow;
+                dlg.ForeColor = this.ColTextPrimary;
+                ApplyWindowTitleBarTheme(dlg);
+
+                Label lbl = new Label
+                {
+                    Text = promptText,
+                    Location = new Point(16, 16),
+                    Size = new Size(370, 50),
+                    ForeColor = this.ColTextPrimary
+                };
+
+                TextBox txt = new TextBox
+                {
+                    Text = defaultValue ?? "",
+                    Location = new Point(16, 75),
+                    Size = new Size(370, 24),
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary,
+                    BorderStyle = BorderStyle.FixedSingle
+                };
+
+                Button btnOk = new Button
+                {
+                    Text = Tr("확인", "OK"),
+                    DialogResult = DialogResult.OK,
+                    Location = new Point(220, 125),
+                    Size = new Size(80, 28),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColAccent,
+                    ForeColor = Color.White
+                };
+                btnOk.FlatAppearance.BorderSize = 0;
+
+                Button btnCancel = new Button
+                {
+                    Text = Tr("취소", "Cancel"),
+                    DialogResult = DialogResult.Cancel,
+                    Location = new Point(306, 125),
+                    Size = new Size(80, 28),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary
+                };
+                btnCancel.FlatAppearance.BorderColor = this.ColBorder;
+
+                dlg.Controls.AddRange(new Control[] { lbl, txt, btnOk, btnCancel });
+                dlg.AcceptButton = btnOk;
+                dlg.CancelButton = btnCancel;
+
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    return txt.Text;
+                }
+                return null;
+            }
+        }
+
+        public void ExportChannelChatLog(NyaaServerSession session, string roomId)
+        {
+            if (session == null || string.IsNullOrEmpty(roomId)) return;
+            List<ChatMessageItem> history = session.GetOrCreateRoomHistory(roomId);
+            if (history == null || history.Count == 0)
+            {
+                MessageBox.Show(this, Tr("내보낼 대화 기록이 없습니다.", "No chat history to export."), Tr("알림", "Notice"), MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            using (SaveFileDialog sfd = new SaveFileDialog())
+            {
+                string safeRoom = roomId.Replace("#", "").Replace("/", "_").Replace("\\", "_");
+                string defaultName = string.Format("NyaaChat_{0}_{1}_{2:yyyyMMdd_HHmmss}", session.Host, safeRoom, DateTime.Now);
+                sfd.FileName = defaultName;
+                sfd.Filter = "HTML 파일 (*.html)|*.html|텍스트 파일 (*.txt)|*.txt";
+                sfd.DefaultExt = "html";
+
+                if (sfd.ShowDialog(this) == DialogResult.OK)
+                {
+                    try
+                    {
+                        string ext = Path.GetExtension(sfd.FileName).ToLowerInvariant();
+                        if (ext == ".txt")
+                        {
+                            StringBuilder sb = new StringBuilder();
+                            sb.AppendLine(string.Format("=== NyaaChat Chat Log: {0} ({1}) ===", roomId, session.ServerName));
+                            sb.AppendLine(string.Format("Exported: {0:yyyy-MM-dd HH:mm:ss}", DateTime.Now));
+                            sb.AppendLine("----------------------------------------------------------------");
+                            foreach (ChatMessageItem m in history)
+                            {
+                                DateTime dt = DateTimeOffset.FromUnixTimeMilliseconds(m.Timestamp > 0 ? m.Timestamp : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()).ToLocalTime().DateTime;
+                                if (m.Type == "system")
+                                {
+                                    sb.AppendLine(string.Format("[{0:HH:mm:ss}] * {1}", dt, m.Content));
+                                }
+                                else if (m.Type == "action")
+                                {
+                                    sb.AppendLine(string.Format("[{0:HH:mm:ss}] * {1} {2}", dt, m.SenderNick, m.Content));
+                                }
+                                else
+                                {
+                                    sb.AppendLine(string.Format("[{0:HH:mm:ss}] <{1}> {2}", dt, m.SenderNick, m.Content));
+                                }
+                            }
+                            File.WriteAllText(sfd.FileName, sb.ToString(), Encoding.UTF8);
+                        }
+                        else
+                        {
+                            StringBuilder sb = new StringBuilder();
+                            sb.AppendLine("<!DOCTYPE html>");
+                            sb.AppendLine("<html><head><meta charset=\"utf-8\"><title>NyaaChat Log - " + System.Security.SecurityElement.Escape(roomId) + "</title>");
+                            sb.AppendLine("<style>");
+                            sb.AppendLine("body { background: #0f172a; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Malgun Gothic', sans-serif; font-size: 14px; margin: 24px; line-height: 1.6; }");
+                            sb.AppendLine(".header { border-bottom: 2px solid #334155; padding-bottom: 12px; margin-bottom: 16px; }");
+                            sb.AppendLine(".title { font-size: 20px; font-weight: bold; color: #a78bfa; }");
+                            sb.AppendLine(".meta { font-size: 12px; color: #94a3b8; margin-top: 4px; }");
+                            sb.AppendLine(".messages { font-family: 'Consolas', 'Malgun Gothic', monospace; font-size: 13px; }");
+                            sb.AppendLine(".msg { margin-bottom: 4px; word-break: break-all; }");
+                            sb.AppendLine(".ts { color: #64748b; font-family: monospace; font-size: 12px; margin-right: 6px; }");
+                            sb.AppendLine(".nick { font-weight: bold; color: #38bdf8; margin-right: 6px; }");
+                            sb.AppendLine(".system { color: #facc15; font-style: italic; }");
+                            sb.AppendLine(".action { color: #c084fc; font-style: italic; }");
+                            sb.AppendLine(".badge { color: #f59e0b; font-weight: bold; margin-right: 2px; }");
+                            sb.AppendLine("</style></head><body>");
+                            sb.AppendLine("<div class=\"header\">");
+                            sb.AppendLine(string.Format("<div class=\"title\">🐾 NyaaChat Log - {0}</div>", System.Security.SecurityElement.Escape(roomId)));
+                            sb.AppendLine(string.Format("<div class=\"meta\">서버: {0} ({1}) | 내보낸 일시: {2:yyyy-MM-dd HH:mm:ss} | 총 {3}건의 메시지</div>",
+                                System.Security.SecurityElement.Escape(session.ServerName),
+                                System.Security.SecurityElement.Escape(session.Host),
+                                DateTime.Now,
+                                history.Count));
+                            sb.AppendLine("</div><div class=\"messages\">");
+
+                            foreach (ChatMessageItem m in history)
+                            {
+                                DateTime dt = DateTimeOffset.FromUnixTimeMilliseconds(m.Timestamp > 0 ? m.Timestamp : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()).ToLocalTime().DateTime;
+                                string tsSpan = string.Format("<span class=\"ts\">[{0:HH:mm:ss}]</span>", dt);
+
+                                if (m.Type == "system")
+                                {
+                                    sb.AppendLine(string.Format("<div class=\"msg system\">{0}* {1}</div>",
+                                        tsSpan, System.Security.SecurityElement.Escape(m.Content)));
+                                }
+                                else if (m.Type == "action")
+                                {
+                                    sb.AppendLine(string.Format("<div class=\"msg action\">{0}* {1} {2}</div>",
+                                        tsSpan,
+                                        System.Security.SecurityElement.Escape(m.SenderNick),
+                                        System.Security.SecurityElement.Escape(m.Content)));
+                                }
+                                else
+                                {
+                                    string badge = m.IsOp ? "<span class=\"badge\">@</span>" : (m.IsBot ? "<span class=\"badge\">^</span>" : "");
+                                    sb.AppendLine(string.Format("<div class=\"msg\">{0}{1}<span class=\"nick\">&lt;{2}&gt;</span> {3}</div>",
+                                        tsSpan,
+                                        badge,
+                                        System.Security.SecurityElement.Escape(m.SenderNick),
+                                        System.Security.SecurityElement.Escape(m.Content)));
+                                }
+                            }
+
+                            sb.AppendLine("</div></body></html>");
+                            File.WriteAllText(sfd.FileName, sb.ToString(), Encoding.UTF8);
+                        }
+
+                        MessageBox.Show(this, string.Format(Tr("대화 기록이 성공적으로 저장되었습니다:\n{0}", "Chat log exported successfully:\n{0}"), sfd.FileName), Tr("내보내기 완료", "Export Successful"), MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(this, Tr("대화 기록 저장 중 오류가 발생했습니다: ", "Error exporting chat log: ") + ex.Message, Tr("오류", "Error"), MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+            }
+        }
+
         public void ExecuteSlashCommand(string rawInput)
         {
             string trimmed = (rawInput ?? "").Trim();
@@ -4995,7 +5612,83 @@ namespace NyaaChatNative
             }
             if (cmd == "list")
             {
-                OpenServerListExplorer();
+                if (parts.Length > 1)
+                {
+                    SendChatMessageOnActiveSession(trimmed);
+                }
+                else
+                {
+                    OpenServerListExplorer();
+                }
+                return;
+            }
+            if (cmd == "split" || cmd == "dual")
+            {
+                if (parts.Length >= 2)
+                {
+                    string arg = parts[1].ToLowerInvariant();
+                    if (arg == "off" || arg == "close" || arg == "닫기" || arg == "0")
+                    {
+                        CloseSplitView();
+                    }
+                    else
+                    {
+                        string targetRoom = parts[1];
+                        NyaaServerSession targetSess = this.ActiveSession;
+                        if (targetRoom.Contains("::"))
+                        {
+                            string[] p = targetRoom.Split(new string[] { "::" }, 2, StringSplitOptions.None);
+                            string prefix = p[0].Trim();
+                            targetRoom = p[1].Trim();
+                            foreach (NyaaServerSession s in this.Sessions.Values)
+                            {
+                                if (s.Host.IndexOf(prefix, StringComparison.OrdinalIgnoreCase) >= 0 || s.ServerName.IndexOf(prefix, StringComparison.OrdinalIgnoreCase) >= 0)
+                                {
+                                    targetSess = s;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!targetRoom.StartsWith("#")) targetRoom = "#" + targetRoom;
+                        if (targetSess != null)
+                        {
+                            if (!targetSess.Channels.ContainsKey(targetRoom))
+                            {
+                                targetSess.Emit("join_channel", new Dictionary<string, object>
+                                {
+                                    { "channelName", targetRoom },
+                                    { "key", "" }
+                                });
+                            }
+                            OpenSplitView(targetSess, targetRoom);
+                        }
+                    }
+                }
+                else
+                {
+                    ToggleSplitView();
+                }
+                return;
+            }
+            if (cmd == "export" || cmd == "log")
+            {
+                ExportChannelChatLog(this.ActiveSession, this.ActiveRoomId);
+                return;
+            }
+            if (cmd == "ping")
+            {
+                if (this.ActiveSession != null && this.ActiveSession.IsConnected)
+                {
+                    string pingMsg = this.ActiveSession.PingMs >= 0
+                        ? string.Format(Tr("* [{0}] 지연 시간(RTT): {1}ms", "* [{0}] Latency (RTT): {1}ms"), this.ActiveSession.Host, this.ActiveSession.PingMs)
+                        : string.Format(Tr("* [{0}] 지연 시간 측정 중...", "* [{0}] Measuring latency..."), this.ActiveSession.Host);
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, pingMsg);
+                }
+                return;
+            }
+            if (cmd == "stats" || cmd == "serverinfo" || cmd == "telemetry")
+            {
+                SendChatMessageOnActiveSession(trimmed);
                 return;
             }
             if (cmd == "nick")
@@ -5590,8 +6283,8 @@ namespace NyaaChatNative
         private static string SanitizeShellArgument(string raw)
         {
             if (string.IsNullOrEmpty(raw)) return "";
-            // Strip shell command-chaining, redirection, and variable expansion metacharacters
-            return Regex.Replace(raw, @"[&|;><`^%\r\n""]", " ").Trim();
+            // Strip shell command-chaining, redirection, argument separation, and variable expansion metacharacters
+            return Regex.Replace(raw, @"[&|;><`^%\r\n""!,=]", " ").Trim();
         }
 
         private string ExpandScriptVariables(string template, NyaaServerSession session, string roomId, string argsText, bool forShellExec = false)
@@ -7510,7 +8203,7 @@ namespace NyaaChatNative
                 Label lblSoundNotice = new Label
                 {
                     Location = new Point(16, 26),
-                    Size = new Size(412, 34),
+                    Size = new Size(310, 34),
                     AutoSize = false,
                     Font = new Font("맑은 고딕", 8.4f),
                     ForeColor = this.ColTextSecondary
@@ -7518,16 +8211,28 @@ namespace NyaaChatNative
 
                 Button btnOpenSoundsDir = new Button
                 {
-                    Location = new Point(434, 26),
-                    Size = new Size(134, 28),
+                    Location = new Point(334, 26),
+                    Size = new Size(116, 28),
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.5f),
+                    Font = new Font("맑은 고딕", 8.3f),
                     Cursor = Cursors.Hand
                 };
                 btnOpenSoundsDir.FlatAppearance.BorderColor = this.ColBorder;
                 btnOpenSoundsDir.Click += delegate { OpenSubFolder("sounds"); };
+
+                Button btnAddCustomWav = new Button
+                {
+                    Location = new Point(456, 26),
+                    Size = new Size(112, 28),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColBgSidebar,
+                    ForeColor = this.ColTextPrimary,
+                    Font = new Font("맑은 고딕", 8.3f),
+                    Cursor = Cursors.Hand
+                };
+                btnAddCustomWav.FlatAppearance.BorderColor = this.ColBorder;
 
                 string[] wavFiles = GetUserSoundFiles();
                 string[] sndKeys = new string[] { "SoundMention", "SoundMessage", "SoundJoin", "SoundAlert" };
@@ -7587,6 +8292,50 @@ namespace NyaaChatNative
                     grpSounds.Controls.AddRange(new Control[] { l, cb, bTest });
                 }
 
+                btnAddCustomWav.Click += delegate
+                {
+                    using (OpenFileDialog ofd = new OpenFileDialog())
+                    {
+                        ofd.Filter = "웨이브 사운드 파일 (*.wav)|*.wav";
+                        ofd.Title = Tr("추가할 WAV 효과음 파일 선택", "Select WAV Sound File to Add");
+                        if (ofd.ShowDialog(dlg) == DialogResult.OK)
+                        {
+                            try
+                            {
+                                string targetDir = Path.Combine(this.BaseDir, "sounds");
+                                if (!Directory.Exists(targetDir)) Directory.CreateDirectory(targetDir);
+                                string fileName = Path.GetFileName(ofd.FileName);
+                                string targetPath = Path.Combine(targetDir, fileName);
+                                File.Copy(ofd.FileName, targetPath, true);
+
+                                string[] reloadedFiles = GetUserSoundFiles();
+                                for (int ci = 0; ci < 4; ci++)
+                                {
+                                    object sel = sndCombos[ci].SelectedItem;
+                                    sndCombos[ci].Items.Clear();
+                                    sndCombos[ci].Items.Add(Tr("(사용 안 함)", "(Disabled)"));
+                                    int matchIdx = -1;
+                                    foreach (string wf in reloadedFiles)
+                                    {
+                                        int newIdx = sndCombos[ci].Items.Add(wf);
+                                        if (string.Equals(wf, fileName, StringComparison.OrdinalIgnoreCase)) matchIdx = newIdx;
+                                        else if (sel != null && string.Equals(wf, sel.ToString(), StringComparison.OrdinalIgnoreCase)) sndCombos[ci].SelectedIndex = newIdx;
+                                    }
+                                    if (ci == 0 && matchIdx > 0 && sndCombos[ci].SelectedIndex <= 0)
+                                    {
+                                        sndCombos[ci].SelectedIndex = matchIdx;
+                                    }
+                                }
+                                MessageBox.Show(dlg, string.Format(Tr("'{0}' 파일이 sounds/ 폴더에 복사되어 목록에 추가되었습니다.", "'{0}' copied to sounds/ and added to list."), fileName), Tr("효과음 추가 완료", "Sound Added"), MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            }
+                            catch (Exception ex)
+                            {
+                                MessageBox.Show(dlg, Tr("효과음 파일 복사 중 오류: ", "Error copying sound file: ") + ex.Message, Tr("오류", "Error"), MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            }
+                        }
+                    }
+                };
+
                 CheckBox chkBeepFallback = new CheckBox
                 {
                     Checked = GetIni("Sounds", "UseSystemBeepFallback", "false").ToLower() == "true",
@@ -7596,7 +8345,7 @@ namespace NyaaChatNative
                     ForeColor = this.ColTextSecondary
                 };
 
-                grpSounds.Controls.AddRange(new Control[] { lblSoundNotice, btnOpenSoundsDir, chkBeepFallback });
+                grpSounds.Controls.AddRange(new Control[] { lblSoundNotice, btnOpenSoundsDir, btnAddCustomWav, chkBeepFallback });
 
                 GroupBox grpSecLog = new GroupBox
                 {
@@ -8580,6 +9329,7 @@ namespace NyaaChatNative
                     grpSounds.Text = Tr("상황별 사용자 효과음 연결 설정 (sounds/*.wav)", "User Sound Effects by Event (sounds/*.wav)");
                     lblSoundNotice.Text = Tr("원하시는 .wav 파일을 sounds/ 폴더에 넣으신 후 상황별로 선택하세요.\r\n(기본 배포판에는 무거운 미디어 파일이 포함되지 않습니다)", "Place your .wav files in the sounds/ folder and assign them below.");
                     btnOpenSoundsDir.Text = Tr("sounds/ 폴더 열기", "Open sounds/ Folder");
+                    btnAddCustomWav.Text = Tr("+ WAV 추가", "+ Add WAV");
                     sndLabels[0].Text = Tr("내 닉네임 멘션:", "Mention Alert:");
                     sndLabels[1].Text = Tr("일반 메시지 수신:", "New Message:");
                     sndLabels[2].Text = Tr("채널 입/퇴장 알림:", "Channel Join/Part:");
@@ -9093,6 +9843,24 @@ namespace NyaaChatNative
             }
         }
 
+        public static bool IsLocalHost(string host)
+        {
+            if (string.IsNullOrEmpty(host)) return false;
+            string h = host.Split(':')[0].Trim().ToLowerInvariant();
+            if (h == "localhost" || h == "127.0.0.1" || h == "::1") return true;
+            if (h.StartsWith("192.168.") || h.StartsWith("10.")) return true;
+            if (h.StartsWith("172."))
+            {
+                string[] parts = h.Split('.');
+                int sec = 0;
+                if (parts.Length >= 2 && int.TryParse(parts[1], out sec))
+                {
+                    if (sec >= 16 && sec <= 31) return true;
+                }
+            }
+            return false;
+        }
+
         public static string NormalizeUrl(string raw)
         {
             if (string.IsNullOrEmpty(raw)) return "";
@@ -9100,6 +9868,22 @@ namespace NyaaChatNative
             if (!s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !s.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
                 s = "https://" + s;
+            }
+            else if (s.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+            {
+                // External hosts default to HTTPS; HTTP is only tolerated for local IPs
+                try
+                {
+                    Uri uri = new Uri(s);
+                    if (!IsLocalHost(uri.Host))
+                    {
+                        s = "https://" + s.Substring("http://".Length);
+                    }
+                }
+                catch
+                {
+                    s = "https://" + s.Substring("http://".Length);
+                }
             }
             return s.TrimEnd('/');
         }
