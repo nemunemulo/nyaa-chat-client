@@ -478,7 +478,7 @@ class NyaaChatLinuxNativeApp:
     def prompt_add_server(self):
         url = simpledialog.askstring("서버 동시 접속", "추가로 접속할 서버 주소:", initialvalue="https://", parent=self.root)
         if url:
-            self.connect_or_switch(url, "#소드걸스")
+            self.connect_or_switch(url, "#자유대화")
 
     def open_server_list(self):
         if not self.active_session:

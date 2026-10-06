@@ -1,134 +1,109 @@
-# 🐾 NyaaChat Native Multi-Server Client (Direction B: 초경량 순수 네이티브 & 다중서버)
+# 🐾 NyaaChat Client
 
-> **웹뷰(WebView2)·브라우저 엔진 제거! 100% 순수 네이티브 Win32 (`NyaaChat.exe` 약 81.5 KB) · 실행 0.02초 · 클릭 반응 0ms · 다중 서버 동시 접속 · 화이트리스트 서버 교류 · 갈라파고스화 방지 서버별 모듈 규격**
+Windows 데스크톱용 실시간 채팅 클라이언트입니다. .NET Framework 4.8 기반으로 별도의 외부 DLL 없이 단일 실행 파일로 작동하며, 다중 서버 동시 접속을 지원합니다.
+
+- 🌐 **백엔드 채팅 서버 (Node.js)**: [nyaa-chat 서버 저장소 바로가기](https://github.com/nemunemulo/nyaa-chat)
 
 ---
 
-## 📁 폴더 및 파일 구조 (`NyaaChat.exe` 무교체 오픈 텍스트 구조)
+## 📁 폴더 및 파일 구조
 
 ```text
 client/
-├── NyaaChat.exe             # 순수 네이티브 Win32 실행 파일 (~81.5KB, 외부 DLL 0개, Win11 기본 내장 실행)
-├── build.bat                # Windows 기본 내장 csc.exe 원클릭 빌드 스크립트
-├── settings.ini             # 기본 서버 주소, 동시 자동접속 서버(AutoConnectServers), 테마, 효과음 설정
-├── aliases.txt              # 사용자 정의 슬래시 명령어 단축키 (/j, /w, /sv 등)
+├── NyaaChat.exe             # 클라이언트 실행 파일 (.NET Framework 4.8)
+├── build.bat                # Windows 내장 csc.exe 컴파일 배치 스크립트
+├── settings.example.ini     # 설정 예시 파일 (실행 시 settings.ini 자동 생성)
+├── aliases.txt              # 슬래시 명령어 단축키 (/j, /w 등)
 ├── scripts/
-│   └── user_script.txt      # mIRC 스타일 이벤트 스크립트 (ON CONNECT / ON JOIN / ON TEXT / ON INPUT)
+│   └── user_script.txt      # 이벤트 트리거 스크립트 예시
 ├── modules/
-│   ├── README.txt           # 서버별 전용 확장 모듈/플러그인 규격 안내 (하위호환 100% 보장)
-│   └── sample_CCC.txt       # 예시: C서버 전용 CCC 봇 상호작용 모듈 (타 서버 이동 시 자동 비활성화)
+│   ├── README.txt           # 서버별 확장 모듈 규격 안내
+│   └── sample_CCC.txt       # 서버 전용 모듈 예시
 ├── themes/
 │   ├── default_dark.ini     # 기본 다크 테마
-│   ├── mirc_classic.ini     # 추억의 클래식 mIRC 화이트 테마
-│   ├── pc_hitel.ini         # 90년대 PC통신 하이텔/나우누리 블루 테마
-│   └── matrix_green.ini     # 해커 터미널 그린 테마
+│   ├── classic_white.ini    # 클래식 화이트 테마
+│   ├── pc_hitel.ini         # 블루 테마
+│   └── matrix_green.ini     # 그린 테마
 ├── sounds/
-│   └── README.txt           # 효과음 안내문 (기본 배포 시 음성/영상 파일 0개 포함)
+│   └── README.txt           # 사용자 효과음 연결 안내문
 ├── linux_arm/
-│   └── nyaachat_native.py   # x86_64 리눅스 & ARM64(라즈베리파이 등) 무설치 네이티브 클라이언트
+│   └── nyaachat_native.py   # Linux / ARM 콘솔 클라이언트
 └── android_apk/
-    └── README.txt           # 마켓 미출시 독립 사이드로딩 APK 빌드 가이드
+    └── README.txt           # 모바일 접속 안내
 ```
 
 ---
 
-## 🌐 1. 다중 서버 동시 접속 & 화이트리스트 서버 리스트 (`F2` / `/servers`)
+## 🚀 빌드 방법
 
-1. **서버 간 채팅 비연동 · 유저 자유 이동 및 동시 접속**:
-   - `A서버`, `B서버`, `C서버`는 채팅 내용을 서로 섞지 않고 각자 독립적으로 동작합니다.
-   - 유저는 한 클라이언트 창에서 **여러 서버(`A서버`, `C서버` 등)를 동시에 접속**해 두고 좌측 트리(`🌐 다중 서버 & 채널 트리`)에서 클릭 한 번으로 오갈 수 있습니다.
-2. **채널 헤더/토픽 서버 식별 표시 (`#소드걸스 [c.org · C서버]`)**:
-   - `A서버 #소드걸스`에 입장 중인 `사기야` 유저가 **`[🌐 서버 리스트 (F2)]`** 또는 `/servers`를 호출하면 화이트리스트 공개 서버 목록이 표시됩니다.
-   - `C서버`를 더블클릭하면 **`C서버`의 공개 채널 리스트(`#소드걸스`, `#자유대화` 등)**가 우측에 쭉 나옵니다.
-   - 거기서 `C서버 #소드걸스`를 더블클릭하면 **기존 `A서버` 연결을 유지한 채 `C서버` 세션이 하나 더 열리며** `C서버 #소드걸스`로 즉시 입장합니다.
-   - 상단 채널 토픽 바에는 **`#소드걸스 [c.org · C서버]`** 형태로 도메인과 서버 이름이 명시되어, 채널명이 중복이어도 어느 서버의 `#소드걸스`인지 즉시 구별됩니다.
-3. **화이트리스트(Whitelist) 수동 이웃 교류 & 생존성**:
-   - 무분별한 오픈 등록 대신 **서버 관리자끼리 수동으로 허용한 화이트리스트 이웃 서버(`data/peers_whitelist.txt` 또는 `/peer add <주소>`)**끼리만 서버 상태와 공개 채널 리스트를 주기적으로 주고받습니다.
-   - 특정 스테이터스 서버나 이웃 서버가 다운되더라도 마지막으로 교류된 디렉토리 스냅샷(`data/network_directory.json`)을 보존하며, 살아있는 화이트리스트 서버끼리 계속 목록을 공유합니다.
+Windows 내장 C# 컴파일러(`csc.exe`)를 통해 바로 빌드할 수 있습니다:
+```cmd
+build.bat
+```
+빌드가 완료되면 `NyaaChat.exe`가 생성됩니다.
 
 ---
 
-## 🧩 2. 서버별 확장 명령어 & 모듈 규격 (갈라파고스화 방지 · 하위호환 100%)
+## ⚙️ 기본 설정 (`settings.ini`)
 
-1. **기본 표준 기능 불변 보장 (`PROTECTED_CORE_COMMANDS`)**:
-   - `/join`, `/part`, `/list`, `/servers`, `/server`, `/nick`, `/whois`, `/topic`, `/mode`, `/op`, `/deop`, `/kick`, `/ban`, `/unban`, `/oper`, `/112`, `/me`, `/clear`, `/help` 등 **표준 채팅 명령어는 어떤 서버나 모듈도 덮어쓰거나 침해할 수 없습니다.**
-2. **하위호환 100% 보장 (`A서버 ↔ C서버` 자유 왕래)**:
-   - 가장 원초적인 채팅 기능에만 집중하는 표준 서버(`A서버`) 유저가 전용 봇 모듈(`CCC`)이 있는 `C서버`에 갈 때는 모듈을 안내받거나 버튼 클릭으로 바로 사용할 수 있습니다.
-   - 반대로 **`C서버` 유저가 표준 서버인 `A서버`에 접속할 때 모듈 유무 때문에 입장이 막히는 일은 절대 발생하지 않습니다.**
-3. **타 서버 이동 시 자동 비활성화**:
-   - `C서버` 전용 확장 명령어(`/ccc` 등)와 전용 모듈 버튼 바(`🧩 현재 서버 전용 확장/모듈`)는 **`C서버` 창을 보고 있을 때만 활성화**되며, 좌측 트리에서 `A서버` 창으로 전환하면 **즉시 비활성화(숨김)**됩니다.
+프로그램 첫 실행 시 `settings.example.ini`를 바탕으로 `settings.ini`가 자동 생성됩니다.
+
+```ini
+[Server]
+Url=https://nemulo.duckdns.org
+DefaultChannel=#자유대화
+AutoConnect=true
+AutoConnectServers=https://nemulo.duckdns.org
+
+[AutoJoin]
+nemulo.duckdns.org=#자유대화
+
+[User]
+DefaultNickname=
+NickPassword=
+Avatar=🐾
+```
+
+- **`Url`**: 기본 접속 서버 주소입니다.
+- **`DefaultChannel`**: 첫 접속 시 입장할 기본 채널입니다.
+- **`AutoConnectServers`**: 프로그램 시작 시 동시에 연결할 서버 주소 목록입니다 (쉼표로 구분).
+- **`[AutoJoin]`**: 서버별 자동 입장 채널 목록을 설정합니다.
 
 ---
 
-## 👑 3. 새 VPS 서버 구축 시 화이트리스트 연동 명령어 (`/oper` 인증 후)
+## 🌐 주요 기능 및 단축키
 
-추가 VPS 서버를 띄우신 뒤 채팅창에서 `/oper <관리자ID> <비밀번호>` 인증 후 아래 명령어로 즉시 설정할 수 있습니다 (`data/peers_whitelist.txt` 파일을 직접 메모장으로 편집해도 됩니다):
+- **단축키**:
+  - `F2`: 화이트리스트 서버 및 공개 채널 목록 창
+  - `F10`: 환경설정 창 (서버, 닉네임, 테마, 효과음, 패널 너비 등)
+  - `F9` 또는 `/modules`: 서버별 확장 모듈 관리자
+  - `Alt + R`: 사용자 정의 스크립트 편집기
+  - `Alt + Q`: 창 즉시 숨기기 / 복원 (보스 키)
+- **다중 서버 접속**:
+  - 좌측 트리에 접속한 서버들이 표시되며, 클릭하여 서버 간을 전환할 수 있습니다.
+  - `/server <주소> [#채널]` 명령어로 새로운 서버에 동시 접속할 수 있습니다.
+
+---
+
+## 💬 주요 슬래시 명령어
 
 | 명령어 | 설명 | 예시 |
 | :--- | :--- | :--- |
-| `/servername <이름>` | 내 서버의 표시 이름 설정 | `/servername C서버` |
-| `/serverurl <주소>` | 내 서버의 공개 접속 URL 설정 | `/serverurl https://c.org` |
-| `/peer add <서버주소>` | 화이트리스트 이웃 서버 추가 및 즉시 동기화 | `/peer add https://a.org` |
-| `/peer del <서버주소>` | 화이트리스트 이웃 서버 제거 | `/peer del https://a.org` |
-| `/peer list` | 등록된 화이트리스트 서버 및 교류 상태 조회 | `/peer list` |
-| `/peer sync` | 화이트리스트 이웃 서버들과 즉시 수동 동기화 | `/peer sync` |
-| `/extcmd add </명령> <설명>\|<응답>` | 이 서버 전용 확장 명령어 등록 (기본 명령어 침해 불가) | `/extcmd add /ccc CCC 봇 호출\|[CCC봇] 안녕하세요!` |
-| `/extcmd del </명령>` | 이 서버 전용 확장 명령어 삭제 | `/extcmd del /ccc` |
-| `/extcmd list` | 이 서버 전용 확장 명령어 목록 확인 | `/extcmd list` |
+| `/help` | 명령어 도움말 확인 | `/help` |
+| `/nick <새닉네임>` | 닉네임 변경 | `/nick 냥이` |
+| `/join <채널명> [암호]` | 채널 입장 (신설 또는 입장) | `/join #자유대화` |
+| `/part` (또는 `/leave`) | 현재 채널에서 퇴장 | `/part` |
+| `/list` | 채널 목록 창 열기 | `/list` |
+| `/servers` (또는 `F2`) | 서버 목록 창 열기 | `/servers` |
+| `/server <주소> [#채널]` | 다른 서버 동시 접속 창 열기 | `/server https://c.org #게임채널` |
+| `/whois <닉네임>` | 사용자 정보 확인 | `/whois 철수` |
+| `/msg <닉네임> <내용>` | 1:1 귓속말 전송 | `/msg 영희 안녕!` |
+| `/me <행동>` | 3인칭 행동 묘사 메시지 | `/me 기지개를 켠다` |
+| `/ping` | 서버 지연시간(RTT) 확인 | `/ping` |
+| `/clear` | 대화창 비우기 | `/clear` |
 
 ---
 
-## 🔊 4. 효과음 파일 분리 배포 정책
-- 본 클라이언트 패키지에는 **어떠한 음성(`.wav`, `.mp3`)이나 영상 파일도 기본 포함되어 있지 않습니다.**
-- 효과음을 원하시는 경우 상단 **`[🔊 효과음 설정]`** 버튼을 눌러 본인이 소장한 `.wav` 파일을 직접 연결해 사용하실 수 있습니다.
+## 📜 라이선스
 
----
-
-## 📱 5. 크로스 플랫폼 3대 전략 (Windows / Linux / Android)
-
-| 플랫폼 | 구현 형태 | 기술 스택 | 특징 및 역할 |
-| :--- | :--- | :--- | :--- |
-| **Windows** | 데스크톱 GUI | **C# Win32 (`NyaaChat.exe`, ~81.5KB)** | 무설치 단일 exe, 실행 0.02초, 0ms 반응, 레트로 mIRC 감성 |
-| **Linux / ARM** | 콘솔 TUI | **경량 C# / Python TUI** | Wayland/X11 의존성 제로, SSH/tmux 원격 세션 호환, 오픈 소켓 프로토콜 |
-| **Android / 기타** | 웹 PWA | **반응형 Web (`public/`)** | 무설치 브라우저 접속 및 '홈 화면에 추가', 테마/단축키 Import/Export 지원 |
-
-* **모듈 플랫폼 라벨 (`Platform=`)**:
-  - `[Module]` 섹션에 `Platform=all | windows | linux | web | android` 지정.
-  - 채팅 매크로/봇 버튼은 `Platform=all`로 전 플랫폼 호환.
-  - 파워쉘 콘솔 등 OS 종속 기능은 `Platform=windows`로 선언하여 타 기종에서 자동 무시 처리.
-
----
-
-## ⚡ 6. IRC 스타일 서버별 자동 조인 (Auto-Join) & 시작 자동 접속
-
-1. **클라이언트 로컬 저장 원칙**:
-   - 자동 조인 채널 목록은 서버에 저장되지 않고, 유저 로컬의 `settings.ini` 파일(`[AutoJoin]` 섹션)에만 보관됩니다.
-   - 특정 공용 채널(#자유대화)로 유저가 쏠리는 현상을 완화하고, 유저가 원하는 소그룹/관심 채널로 즉시 분산 입장할 수 있습니다.
-2. **서버별 독립 채널 매핑**:
-   ```ini
-   [AutoJoin]
-   tnemu.duckdns.org=#자유채널, #바보, #천천히
-   nemulo.duckdns.org=#자유채널, #바보
-   ```
-   - `tnemu` 서버에 연결되는 즉시 `#자유채널`, `#바보`, `#천천히` 3개 채널에 자동으로 동시 입장합니다.
-   - `nemulo` 서버에 접속할 때는 해당 서버 목록인 `#자유채널`, `#바보` 채널로 자동 입장합니다.
-3. **시작 시 자동 접속 (AutoConnectServers)**:
-   ```ini
-   [Server]
-   AutoConnect=true
-   AutoConnectServers=https://tnemu.duckdns.org, https://nemulo.duckdns.org
-   ```
-   - 클라이언트 실행과 동시에 지정된 서버들에 순차/동시 접속하여 원하는 모든 채널 창이 즉각 열립니다.
-   - 환경설정(F10) 창에서 서버별 자동 조인 채널과 시작 서버를 GUI로 손쉽게 편집할 수 있습니다.
-
-4. **채널 입장 플러드 방어 (Join Flood Throttling) & 기본 채널 자율성**:
-   - **서버 플러드 방어 규칙**:
-     - 2초당 최대 5개 채널 입장 허용 (`JOIN_FLOOD_MAX = 5 / 2,000ms`).
-     - 1~2회 초과 시 시스템 경고 메시지 전송 후 소켓 강제 드롭(Disconnect).
-     - 24시간 내 3회 적발 시 24시간 IP 임시 차단 (하루 밴).
-     - 서버 관리자(/oper, /aioper) 및 시스템 봇(^냥봇)은 자동 면제.
-   - **클라이언트 백그라운드 페이싱**:
-     - 자동 조인 시 수십 개 채널을 일시에 쏘지 않고, `ThreadPool` 백그라운드 큐를 통해 채널당 450ms 간격 및 4채널마다 2.0초 휴지기를 부여하여 서버 제한(2초당 5개)을 절대 초과하지 않도록 설계.
-   - **기본 채널(#자유대화) 자율성**:
-     - 초기 배포 시에는 입문 편의를 위해 `#자유대화`가 기본값으로 설정되어 있으나, 유저가 `settings.ini` 또는 F10 설정창에서 `DefaultChannel`을 변경하거나 `[AutoJoin]` 목록에 원하는 채널들만 지정하면 접속 시 `#자유대화`에 일절 들어가지 않고 원하는 채널로만 바로 진입 가능.
-
+이 프로젝트는 [MIT License](LICENSE)에 따라 자유롭게 사용, 수정, 배포할 수 있습니다.

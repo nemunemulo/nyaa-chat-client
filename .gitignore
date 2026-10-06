@@ -1,10 +1,19 @@
-﻿# Personal chat logs and user-added sound files
+# ============================================================================
+# Nyaa Chat Native Client Git Ignore Rules
+# ============================================================================
+
+# Personal runtime settings (Keep settings.example.ini for repository)
+settings.ini
+*.ini.bak
+
+# Personal chat history and custom sound files
 logs/*
 !logs/README.txt
 sounds/*
 !sounds/README.txt
 
-# OS & Temp files
+# OS & Temporary runtime files
 *.log
+*.tmp
 .DS_Store
 Thumbs.db

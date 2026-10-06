@@ -1,19 +1,9 @@
 // ============================================================================
-// Nyaa Chat Native Multi-Server Client (Direction B - Pure Native Engine)
+// Nyaa Chat Desktop Client
 // ============================================================================
-// [설계 및 보안 원칙]
-// 1. 웹뷰(WebView2 / 크롬 엔진)나 외부 DLL을 일절 사용하지 않는 100% 순수 윈도우
-//    네이티브 실행 파일입니다. (메모리 ~15MB, 기동 시간 0.02초, 반응 지연 0ms)
-// 2. 다중 서버 동시 접속(Multi-Server Session)을 기본 지원합니다:
-//    - A서버 #소드걸스 에 있으면서 [서버 리스트]에서 C서버 더블클릭 -> C서버 #소드걸스
-//      더블클릭 시, 기존 A서버 연결을 유지한 채 C서버 창을 추가로 열어 동시 접속합니다.
-//    - 채널 상단 토픽 바에 [#소드걸스 | C.org · C서버] 형태로 명확히 구분 표시됩니다.
-// 3. 갈라파고스화 방지 및 100% 하위호환:
-//    - 기본 표준 명령어(Core)는 절대 침해/덮어쓰기가 불가능합니다.
-//    - 서버 전용 확장 명령어나 모듈(modules/*.txt)은 해당 서버 창을 볼 때만
-//      고지 및 활성화되며, 타 서버(순정 A서버 등)로 전환 시 즉시 자동 비활성화됩니다.
-// 4. NyaaChat.exe는 한 번 받으면 교체할 필요 없이 폴더 내 .ini / .txt 파일만
-//    수정하여 스킨, 단축명령어, 스크립트, 효과음을 영구적으로 개조할 수 있습니다.
+// - Windows .NET Framework 4.8 기반 단일 실행 파일 클라이언트입니다.
+// - 다중 서버 동시 접속 및 채널별 대화를 지원합니다.
+// - 설정 파일(.ini, .txt)을 통한 테마, 단축키, 스크립트 커스터마이징을 지원합니다.
 // ============================================================================
 
 using System;
@@ -326,23 +316,7 @@ namespace NyaaChatNative
         public void StartPingTimer()
         {
             StopPingTimer();
-            try
-            {
-                this.pingTimer = new System.Threading.Timer(delegate(object state)
-                {
-                    try
-                    {
-                        if (this.IsConnected && this.ws != null && this.ws.State == WebSocketState.Open)
-                        {
-                            Dictionary<string, object> p = new Dictionary<string, object>();
-                            p["t"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                            Emit("client_ping", p);
-                        }
-                    }
-                    catch { }
-                }, null, 1000, 10000);
-            }
-            catch { }
+            // Periodic background ping measuring disabled per user request
         }
 
         public void StopPingTimer()
@@ -669,13 +643,52 @@ namespace NyaaChatNative
         private const uint MOD_ALT = 0x0001;
         private const uint VK_Q = 0x51;
 
+        // System Default Font Resolver (Inherits OS-configured native font dynamically)
+        private static string _cachedSystemFontName = null;
+        public static string GetSystemDefaultFontName()
+        {
+            if (_cachedSystemFontName != null) return _cachedSystemFontName;
+            try
+            {
+                if (SystemFonts.MessageBoxFont != null && !string.IsNullOrEmpty(SystemFonts.MessageBoxFont.Name))
+                {
+                    _cachedSystemFontName = SystemFonts.MessageBoxFont.Name;
+                    return _cachedSystemFontName;
+                }
+            }
+            catch { }
+            try
+            {
+                if (SystemFonts.DefaultFont != null && !string.IsNullOrEmpty(SystemFonts.DefaultFont.Name))
+                {
+                    _cachedSystemFontName = SystemFonts.DefaultFont.Name;
+                    return _cachedSystemFontName;
+                }
+            }
+            catch { }
+            _cachedSystemFontName = FontFamily.GenericSansSerif.Name;
+            return _cachedSystemFontName;
+        }
+
+        public static Font CreateUiFont(float size, FontStyle style = FontStyle.Regular)
+        {
+            try
+            {
+                return new Font(GetSystemDefaultFontName(), size, style);
+            }
+            catch
+            {
+                return new Font(FontFamily.GenericSansSerif, size, style);
+            }
+        }
+
         // Sacred Base Commands (Cannot be overridden by servers, aliases, or modules)
         public static readonly HashSet<string> ProtectedCoreCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "join", "j", "part", "leave", "list", "servers", "server",
             "nick", "whois", "w", "msg", "query", "topic", "mode",
             "op", "deop", "kick", "ban", "unban", "banlist", "oper",
-            "112", "report", "me", "clear", "export", "help",
+            "me", "clear", "export", "help",
             "theme", "color", "font", "lang", "language", "settings", "config", "설정",
             "modules", "module", "모듈",
             "peer", "servername", "serverurl", "extcmd",
@@ -810,9 +823,9 @@ namespace NyaaChatNative
         public Color ColTextTimestamp = ColorTranslator.FromHtml("#64748B");
         public Color ColAccent = ColorTranslator.FromHtml("#4F46E5");
         public Color ColBorder = ColorTranslator.FromHtml("#334155");
-        public Font ChatFont = new Font("맑은 고딕", 10f, FontStyle.Regular);
-        public Font ChatBoldFont = new Font("맑은 고딕", 10f, FontStyle.Bold);
-        public string CurrentFontName = "맑은 고딕";
+        public Font ChatFont = CreateUiFont(10f, FontStyle.Regular);
+        public Font ChatBoldFont = CreateUiFont(10f, FontStyle.Bold);
+        public string CurrentFontName = GetSystemDefaultFontName();
         public float CurrentFontSize = 10f;
         public string CurrentFontWeightMode = "normal"; // "normal" (nick bold, body regular), "bold" (all bold), "light" (all regular)
 
@@ -846,7 +859,6 @@ namespace NyaaChatNative
         private Label lblChannelTopicHeader;
         private Label lblChannelSubTopic;
         private Button btnChannelTopicEdit;
-        private Button btnReport112;
         private Button btnSplitToggle;
         private Button btnTermClear;
         private Button btnTermRestart;
@@ -901,7 +913,17 @@ namespace NyaaChatNative
         public MainForm()
         {
             this.SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
-            this.BaseDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\', '/');
+            string exeDir = null;
+            try
+            {
+                string loc = typeof(MainForm).Assembly.Location;
+                if (!string.IsNullOrEmpty(loc) && File.Exists(loc))
+                {
+                    exeDir = Path.GetDirectoryName(loc);
+                }
+            }
+            catch { }
+            this.BaseDir = (!string.IsNullOrEmpty(exeDir) ? exeDir : AppDomain.CurrentDomain.BaseDirectory).TrimEnd('\\', '/');
             this.psCurrentWorkDir = this.BaseDir;
             this.IniPath = Path.Combine(this.BaseDir, "settings.ini");
             this.AliasesPath = Path.Combine(this.BaseDir, "aliases.txt");
@@ -913,9 +935,20 @@ namespace NyaaChatNative
 
             string title = GetIni("Window", "Title", "Nyaa Chat Native Multi-Server Client");
             int w = ParseInt(GetIni("Window", "Width", "1140"), 1140);
-            int h = ParseInt(GetIni("Window", "Height", "760"), 760);
+            int h = ParseInt(GetIni("Window", "Height", "640"), 640);
             bool topMost = GetIni("Window", "AlwaysOnTop", "false").ToLower() == "true";
             int opacity = ParseInt(GetIni("Window", "Opacity", "100"), 100);
+
+            try
+            {
+                Rectangle workArea = Screen.PrimaryScreen.WorkingArea;
+                if (workArea.Width > 0 && workArea.Height > 0)
+                {
+                    w = Math.Min(w, workArea.Width);
+                    h = Math.Min(h, workArea.Height);
+                }
+            }
+            catch { }
 
             this.Text = title;
             this.Size = new Size(Math.Max(720, w), Math.Max(480, h));
@@ -957,6 +990,15 @@ namespace NyaaChatNative
             {
                 string p = Path.Combine(this.BaseDir, d);
                 if (!Directory.Exists(p)) Directory.CreateDirectory(p);
+            }
+
+            if (!File.Exists(this.IniPath))
+            {
+                string examplePath = Path.Combine(this.BaseDir, "settings.example.ini");
+                if (File.Exists(examplePath))
+                {
+                    try { File.Copy(examplePath, this.IniPath, true); } catch { }
+                }
             }
 
             string psModPath = Path.Combine(this.BaseDir, "modules", "powershell_module.txt");
@@ -1041,7 +1083,7 @@ namespace NyaaChatNative
             this.ColBgTitleBar = ParseColor(GetIniFromDict(tIni, "Colors", "BgTitleBar", ColorToHex(this.ColBgWindow)), this.ColBgWindow);
             this.ColTextTitleBar = ParseColor(GetIniFromDict(tIni, "Colors", "TextTitleBar", ColorToHex(this.ColTextPrimary)), this.ColTextPrimary);
 
-            string fontName = GetIniFromDict(tIni, "Font", "FontName", GetIni("Theme", "FontFamily", "맑은 고딕"));
+            string fontName = GetIniFromDict(tIni, "Font", "FontName", GetIni("Theme", "FontFamily", ""));
             int fontSize = ParseInt(GetIniFromDict(tIni, "Font", "FontSize", GetIni("Theme", "FontSize", "10")), 10);
             string fontWeight = GetIniFromDict(tIni, "Font", "FontWeight", GetIni("Theme", "FontWeight", "normal")).ToLowerInvariant();
             fontSize = Math.Max(8, Math.Min(22, fontSize));
@@ -1134,7 +1176,7 @@ namespace NyaaChatNative
 
         public void RebuildChatFonts(string fontName, float fontSize, string weightMode)
         {
-            if (string.IsNullOrEmpty(fontName)) fontName = "맑은 고딕";
+            if (string.IsNullOrEmpty(fontName) || fontName.Equals("System", StringComparison.OrdinalIgnoreCase)) fontName = GetSystemDefaultFontName();
             fontSize = Math.Max(8f, Math.Min(22f, fontSize));
             string wm = (weightMode ?? "normal").Trim().ToLowerInvariant();
             if (wm != "bold" && wm != "light") wm = "normal";
@@ -1153,8 +1195,8 @@ namespace NyaaChatNative
             }
             catch
             {
-                this.ChatFont = new Font("맑은 고딕", 10f, bodyStyle);
-                this.ChatBoldFont = new Font("맑은 고딕", 10f, nickStyle);
+                this.ChatFont = new Font(GetSystemDefaultFontName(), 10f, bodyStyle);
+                this.ChatBoldFont = new Font(GetSystemDefaultFontName(), 10f, nickStyle);
             }
         }
 
@@ -1565,7 +1607,7 @@ namespace NyaaChatNative
                 Height = 26,
                 TextAlign = ContentAlignment.MiddleLeft,
                 Location = new Point(8, 5),
-                Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                Font = CreateUiFont( 9f, FontStyle.Bold)
             };
 
             this.btnServerList = CreateToolbarButton("서버 리스트 (F2)", 166, 118);
@@ -1606,7 +1648,7 @@ namespace NyaaChatNative
                 Text = "접속 서버 및 채널 트리",
                 Location = new Point(8, 8),
                 AutoSize = true,
-                Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                Font = CreateUiFont( 9f, FontStyle.Bold)
             };
             this.btnNewChannel = new Button
             {
@@ -1615,7 +1657,7 @@ namespace NyaaChatNative
                 Location = new Point(146, 5),
                 Anchor = AnchorStyles.Top | AnchorStyles.Right,
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("맑은 고딕", 8.5f, FontStyle.Bold),
+                Font = CreateUiFont( 8.5f, FontStyle.Bold),
                 Cursor = Cursors.Hand
             };
             this.btnNewChannel.FlatAppearance.BorderSize = 1;
@@ -1635,7 +1677,7 @@ namespace NyaaChatNative
                 HideSelection = false,
                 ShowLines = true,
                 ItemHeight = 24,
-                Font = new Font("맑은 고딕", 9.5f)
+                Font = CreateUiFont( 9.5f)
             };
             this.treeServersChannels.NodeMouseClick += OnTreeServersNodeClick;
             this.treeServersChannels.NodeMouseDoubleClick += OnTreeServersNodeDoubleClick;
@@ -1665,7 +1707,7 @@ namespace NyaaChatNative
                 Text = "로컬 터미널 · 모듈",
                 Location = new Point(8, 6),
                 AutoSize = true,
-                Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold)
+                Font = CreateUiFont( 8.8f, FontStyle.Bold)
             };
             this.btnLeftModManage = new Button
             {
@@ -1674,7 +1716,7 @@ namespace NyaaChatNative
                 Location = new Point(174, 3),
                 Anchor = AnchorStyles.Top | AnchorStyles.Right,
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("맑은 고딕", 8f, FontStyle.Bold),
+                Font = CreateUiFont( 8f, FontStyle.Bold),
                 Cursor = Cursors.Hand
             };
             this.btnLeftModManage.FlatAppearance.BorderSize = 1;
@@ -1717,7 +1759,7 @@ namespace NyaaChatNative
                 Text = "#자유대화   [서버 연결 대기 중]",
                 Location = new Point(12, 6),
                 AutoSize = true,
-                Font = new Font("맑은 고딕", 11f, FontStyle.Bold)
+                Font = CreateUiFont( 11f, FontStyle.Bold)
             };
             this.lblChannelSubTopic = new Label
             {
@@ -1726,7 +1768,7 @@ namespace NyaaChatNative
                 AutoSize = false,
                 AutoEllipsis = true,
                 Size = new Size(460, 18),
-                Font = new Font("맑은 고딕", 8.8f)
+                Font = CreateUiFont( 8.8f)
             };
 
             this.btnChannelTopicEdit = new Button
@@ -1736,23 +1778,10 @@ namespace NyaaChatNative
                 Anchor = AnchorStyles.Top | AnchorStyles.Right,
                 Location = new Point(488, 12),
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("맑은 고딕", 8.5f, FontStyle.Bold),
+                Font = CreateUiFont( 8.5f, FontStyle.Bold),
                 Cursor = Cursors.Hand
             };
             this.btnChannelTopicEdit.Click += delegate { PromptEditChannelTopic(); };
-
-            this.btnReport112 = new Button
-            {
-                Text = "신고(/112)",
-                Size = new Size(80, 24),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right,
-                Location = new Point(574, 12),
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("맑은 고딕", 8.5f, FontStyle.Bold),
-                ForeColor = Color.FromArgb(248, 113, 113),
-                Cursor = Cursors.Hand
-            };
-            this.btnReport112.Click += delegate { ExecuteSlashCommand("/112"); };
 
             this.btnSplitToggle = new Button
             {
@@ -1761,7 +1790,7 @@ namespace NyaaChatNative
                 Anchor = AnchorStyles.Top | AnchorStyles.Right,
                 Location = new Point(494, 12),
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("맑은 고딕", 8.3f, FontStyle.Bold),
+                Font = CreateUiFont( 8.3f, FontStyle.Bold),
                 Cursor = Cursors.Hand
             };
             this.btnSplitToggle.FlatAppearance.BorderSize = 1;
@@ -1774,7 +1803,7 @@ namespace NyaaChatNative
                 Anchor = AnchorStyles.Top | AnchorStyles.Right,
                 Location = new Point(400, 12),
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("맑은 고딕", 8.3f, FontStyle.Bold),
+                Font = CreateUiFont( 8.3f, FontStyle.Bold),
                 Visible = false,
                 Cursor = Cursors.Hand
             };
@@ -1795,7 +1824,7 @@ namespace NyaaChatNative
                 Anchor = AnchorStyles.Top | AnchorStyles.Right,
                 Location = new Point(488, 12),
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("맑은 고딕", 8.3f, FontStyle.Bold),
+                Font = CreateUiFont( 8.3f, FontStyle.Bold),
                 Visible = false,
                 Cursor = Cursors.Hand
             };
@@ -1812,7 +1841,7 @@ namespace NyaaChatNative
                 Anchor = AnchorStyles.Top | AnchorStyles.Right,
                 Location = new Point(578, 12),
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("맑은 고딕", 8.3f, FontStyle.Bold),
+                Font = CreateUiFont( 8.3f, FontStyle.Bold),
                 Visible = false,
                 Cursor = Cursors.Hand
             };
@@ -1823,7 +1852,7 @@ namespace NyaaChatNative
 
             this.channelHeaderBar.Controls.AddRange(new Control[] {
                 this.lblChannelTopicHeader, this.lblChannelSubTopic,
-                this.btnChannelTopicEdit, this.btnReport112, this.btnSplitToggle,
+                this.btnChannelTopicEdit, this.btnSplitToggle,
                 this.btnTermClear, this.btnTermRestart, this.btnTermBackToChat
             });
 
@@ -1841,14 +1870,14 @@ namespace NyaaChatNative
                 Text = Tr("검색:", "Find:"),
                 AutoSize = true,
                 Location = new Point(8, 8),
-                Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                Font = CreateUiFont( 9f, FontStyle.Bold)
             };
 
             this.txtSearchQuery = new TextBox
             {
                 Location = new Point(54, 5),
                 Width = 200,
-                Font = new Font("맑은 고딕", 9.5f),
+                Font = CreateUiFont( 9.5f),
                 BorderStyle = BorderStyle.FixedSingle
             };
             this.txtSearchQuery.KeyDown += delegate (object s, KeyEventArgs e)
@@ -1877,7 +1906,7 @@ namespace NyaaChatNative
                 Location = new Point(258, 4),
                 Size = new Size(28, 25),
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("맑은 고딕", 8f, FontStyle.Bold),
+                Font = CreateUiFont( 8f, FontStyle.Bold),
                 Cursor = Cursors.Hand
             };
             this.btnSearchPrev.FlatAppearance.BorderSize = 1;
@@ -1889,7 +1918,7 @@ namespace NyaaChatNative
                 Location = new Point(290, 4),
                 Size = new Size(28, 25),
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("맑은 고딕", 8f, FontStyle.Bold),
+                Font = CreateUiFont( 8f, FontStyle.Bold),
                 Cursor = Cursors.Hand
             };
             this.btnSearchNext.FlatAppearance.BorderSize = 1;
@@ -1900,7 +1929,7 @@ namespace NyaaChatNative
                 Text = "",
                 Location = new Point(326, 8),
                 AutoSize = true,
-                Font = new Font("맑은 고딕", 8.5f)
+                Font = CreateUiFont( 8.5f)
             };
 
             this.btnSearchClose = new Button
@@ -1910,7 +1939,7 @@ namespace NyaaChatNative
                 Size = new Size(28, 25),
                 Location = new Point(500, 4),
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("맑은 고딕", 8.5f, FontStyle.Bold),
+                Font = CreateUiFont( 8.5f, FontStyle.Bold),
                 Cursor = Cursors.Hand
             };
             this.btnSearchClose.FlatAppearance.BorderSize = 0;
@@ -1949,7 +1978,7 @@ namespace NyaaChatNative
                 Dock = DockStyle.Right,
                 Width = 68,
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("맑은 고딕", 9.5f, FontStyle.Bold),
+                Font = CreateUiFont( 9.5f, FontStyle.Bold),
                 Cursor = Cursors.Hand
             };
             this.btnSend.FlatAppearance.BorderSize = 0;
@@ -1959,7 +1988,7 @@ namespace NyaaChatNative
             {
                 Dock = DockStyle.Fill,
                 BorderStyle = BorderStyle.FixedSingle,
-                Font = new Font("맑은 고딕", 10.5f)
+                Font = CreateUiFont( 10.5f)
             };
             this.txtInput.KeyDown += delegate (object s, KeyEventArgs e)
             {
@@ -2112,7 +2141,7 @@ namespace NyaaChatNative
                 Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleLeft,
                 AutoEllipsis = true,
-                Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold)
+                Font = CreateUiFont( 8.8f, FontStyle.Bold)
             };
             this.btnCloseSplit = new Button
             {
@@ -2183,7 +2212,7 @@ namespace NyaaChatNative
                 Text = "현재 채널 참여자 (0명)",
                 Location = new Point(8, 8),
                 AutoSize = true,
-                Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                Font = CreateUiFont( 9f, FontStyle.Bold)
             };
             this.rightHeaderPanel.Controls.Add(this.lblRightUsersTitle);
 
@@ -2193,7 +2222,7 @@ namespace NyaaChatNative
                 BorderStyle = BorderStyle.None,
                 IntegralHeight = false,
                 ItemHeight = 22,
-                Font = new Font("맑은 고딕", 9.5f)
+                Font = CreateUiFont( 9.5f)
             };
             Func<string> getSelectedUserCleanNick = delegate
             {
@@ -2300,7 +2329,6 @@ namespace NyaaChatNative
             if (this.btnLeftModManage != null) this.btnLeftModManage.Text = Tr("+ 관리", "+ Manage");
 
             this.btnChannelTopicEdit.Text = Tr("토픽/모드", "Topic/Mode");
-            this.btnReport112.Text = Tr("신고(/112)", "Report");
             if (this.btnSplitToggle != null) this.btnSplitToggle.Text = this.IsSplitViewActive ? Tr("단일 뷰", "Single View") : Tr("듀얼 뷰", "Split View");
             if (this.btnTermClear != null) this.btnTermClear.Text = Tr("화면 지우기", "Clear");
             if (this.btnTermRestart != null) this.btnTermRestart.Text = Tr("세션 재시작", "Restart");
@@ -2387,7 +2415,7 @@ namespace NyaaChatNative
                 Location = new Point(x, 4),
                 Size = new Size(width, 27),
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                Font = CreateUiFont( 8.8f, FontStyle.Bold),
                 Cursor = Cursors.Hand
             };
             b.FlatAppearance.BorderSize = 1;
@@ -2484,8 +2512,6 @@ namespace NyaaChatNative
             this.btnChannelTopicEdit.BackColor = this.ColBgSidebar;
             this.btnChannelTopicEdit.ForeColor = this.ColTextPrimary;
             this.btnChannelTopicEdit.FlatAppearance.BorderColor = this.ColBorder;
-            this.btnReport112.BackColor = this.ColBgSidebar;
-            this.btnReport112.FlatAppearance.BorderColor = Color.FromArgb(239, 68, 68);
 
             if (this.btnSplitToggle != null)
             {
@@ -2607,7 +2633,6 @@ namespace NyaaChatNative
             if (this.IsTerminalViewActive && this.btnTermBackToChat != null)
             {
                 if (this.btnSplitToggle != null) this.btnSplitToggle.Visible = false;
-                if (this.btnReport112 != null) this.btnReport112.Visible = false;
                 if (this.btnChannelTopicEdit != null) this.btnChannelTopicEdit.Visible = false;
                 this.btnTermBackToChat.Left = this.channelHeaderBar.Width - this.btnTermBackToChat.Width - 10;
                 this.btnTermRestart.Left = this.btnTermBackToChat.Left - this.btnTermRestart.Width - 6;
@@ -2617,7 +2642,6 @@ namespace NyaaChatNative
             else
             {
                 if (this.btnSplitToggle != null) this.btnSplitToggle.Visible = true;
-                if (this.btnReport112 != null) this.btnReport112.Visible = true;
                 if (this.btnChannelTopicEdit != null) this.btnChannelTopicEdit.Visible = true;
 
                 int rightPos = this.channelHeaderBar.Width - 10;
@@ -2625,11 +2649,6 @@ namespace NyaaChatNative
                 {
                     this.btnSplitToggle.Left = rightPos - this.btnSplitToggle.Width;
                     rightPos = this.btnSplitToggle.Left - 6;
-                }
-                if (this.btnReport112 != null)
-                {
-                    this.btnReport112.Left = rightPos - this.btnReport112.Width;
-                    rightPos = this.btnReport112.Left - 6;
                 }
                 if (this.btnChannelTopicEdit != null)
                 {
@@ -2702,7 +2721,7 @@ namespace NyaaChatNative
             using (Form dlg = new Form())
             {
                 dlg.Text = Tr("Nyaa Chat - 접속 설정", "Nyaa Chat - Connection Setup");
-                dlg.Size = new Size(440, 340);
+                dlg.Size = new Size(440, 305);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
                 dlg.MaximizeBox = false;
@@ -2716,7 +2735,7 @@ namespace NyaaChatNative
                     Text = Tr("Nyaa Chat 멀티서버 클라이언트 접속 설정", "Nyaa Chat Multi-Server Connection Setup"),
                     Location = new Point(20, 18),
                     AutoSize = true,
-                    Font = new Font("맑은 고딕", 10f, FontStyle.Bold),
+                    Font = CreateUiFont( 10f, FontStyle.Bold),
                     ForeColor = this.ColTextPrimary
                 };
 
@@ -2727,7 +2746,7 @@ namespace NyaaChatNative
                     Location = new Point(20, 76),
                     Width = 380,
                     MaxLength = 16,
-                    Font = new Font("맑은 고딕", 10f),
+                    Font = CreateUiFont( 10f),
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary
                 };
@@ -2738,7 +2757,7 @@ namespace NyaaChatNative
                     Text = defaultServer,
                     Location = new Point(20, 136),
                     Width = 250,
-                    Font = new Font("맑은 고딕", 9.5f),
+                    Font = CreateUiFont( 9.5f),
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary
                 };
@@ -2749,25 +2768,16 @@ namespace NyaaChatNative
                     Text = defaultChan,
                     Location = new Point(280, 136),
                     Width = 120,
-                    Font = new Font("맑은 고딕", 9.5f),
+                    Font = CreateUiFont( 9.5f),
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary
-                };
-
-                CheckBox chkTerms = new CheckBox
-                {
-                    Text = Tr("[필수] 이용약관, 개인정보 처리방침 동의 및 만 14세 이상 확인", "[Required] Agree to Terms & Privacy Policy (Age 14+)"),
-                    Checked = GetIni("User", "AgreeTerms", "true").ToLower() == "true",
-                    Location = new Point(20, 178),
-                    AutoSize = true,
-                    ForeColor = this.ColTextSecondary
                 };
 
                 CheckBox chkAuto = new CheckBox
                 {
                     Text = Tr("다음 실행 시 이 설정으로 바로 입장 (AutoConnect)", "Auto-connect with these settings on startup"),
                     Checked = autoConnect,
-                    Location = new Point(20, 206),
+                    Location = new Point(20, 180),
                     AutoSize = true,
                     ForeColor = this.ColTextSecondary
                 };
@@ -2775,12 +2785,12 @@ namespace NyaaChatNative
                 Button btnStart = new Button
                 {
                     Text = Tr("채팅방 입장하기", "Connect & Join"),
-                    Location = new Point(20, 244),
+                    Location = new Point(20, 216),
                     Size = new Size(380, 38),
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColAccent,
                     ForeColor = Color.White,
-                    Font = new Font("맑은 고딕", 10f, FontStyle.Bold),
+                    Font = CreateUiFont( 10f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnStart.FlatAppearance.BorderSize = 0;
@@ -2794,15 +2804,9 @@ namespace NyaaChatNative
                         txtNick.Focus();
                         return;
                     }
-                    if (!chkTerms.Checked)
-                    {
-                        MessageBox.Show(Tr("필수 약관 및 만 14세 이상 확인에 체크해 주세요.", "Please check the required agreement box."), Tr("알림", "Notice"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        return;
-                    }
 
                     this.GlobalNickname = nick;
                     SetIniValue("User", "DefaultNickname", nick, false);
-                    SetIniValue("User", "AgreeTerms", "true", false);
                     SetIniValue("Server", "Url", txtSrv.Text.Trim(), false);
                     SetIniValue("Server", "DefaultChannel", txtCh.Text.Trim(), false);
                     SetIniValue("Server", "AutoConnect", chkAuto.Checked ? "true" : "false", true);
@@ -2812,7 +2816,7 @@ namespace NyaaChatNative
                 };
 
                 dlg.AcceptButton = btnStart;
-                dlg.Controls.AddRange(new Control[] { lblWelcome, lblNick, txtNick, lblSrv, txtSrv, lblCh, txtCh, chkTerms, chkAuto, btnStart });
+                dlg.Controls.AddRange(new Control[] { lblWelcome, lblNick, txtNick, lblSrv, txtSrv, lblCh, txtCh, chkAuto, btnStart });
 
                 if (dlg.ShowDialog(this) == DialogResult.OK)
                 {
@@ -3027,7 +3031,7 @@ namespace NyaaChatNative
                         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                         int rtt = (int)Math.Max(0, now - sentTime);
                         session.PingMs = rtt;
-                        UpdateSessionPingInTree(session);
+                        AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format(Tr("* [{0}] 지연 시간(RTT): {1}ms", "* [{0}] Latency (RTT): {1}ms"), session.Host, rtt));
                     }
                 }
                 catch { }
@@ -3702,10 +3706,9 @@ namespace NyaaChatNative
             foreach (NyaaServerSession s in this.Sessions.Values)
             {
                 string connIcon = s.IsConnected ? "●" : "○";
-                string pingStr = (s.IsConnected && s.PingMs >= 0) ? string.Format(" [{0}ms]", s.PingMs) : "";
                 string srvLabel = (string.IsNullOrEmpty(s.ServerName) || s.ServerName.Contains("(") || string.Equals(s.ServerName, s.Host, StringComparison.OrdinalIgnoreCase))
-                    ? string.Format("{0} {1}{2}", connIcon, string.IsNullOrEmpty(s.ServerName) ? s.Host : s.ServerName, pingStr)
-                    : string.Format("{0} {1} ({2}){3}", connIcon, s.ServerName, s.Host, pingStr);
+                    ? string.Format("{0} {1}", connIcon, string.IsNullOrEmpty(s.ServerName) ? s.Host : s.ServerName)
+                    : string.Format("{0} {1} ({2})", connIcon, s.ServerName, s.Host);
                 TreeNode srvNode = new TreeNode(srvLabel)
                 {
                     Tag = new object[] { "server", s }
@@ -3762,33 +3765,7 @@ namespace NyaaChatNative
 
         public void UpdateSessionPingInTree(NyaaServerSession session)
         {
-            if (session == null || this.treeServersChannels == null || this.treeServersChannels.IsDisposed) return;
-            try
-            {
-                if (this.InvokeRequired)
-                {
-                    this.BeginInvoke(new Action<NyaaServerSession>(UpdateSessionPingInTree), session);
-                    return;
-                }
-                foreach (TreeNode srvNode in this.treeServersChannels.Nodes)
-                {
-                    object[] tag = srvNode.Tag as object[];
-                    if (tag != null && tag.Length >= 2 && tag[1] == session)
-                    {
-                        string connIcon = session.IsConnected ? "●" : "○";
-                        string pingStr = (session.IsConnected && session.PingMs >= 0) ? string.Format(" [{0}ms]", session.PingMs) : "";
-                        string srvLabel = (string.IsNullOrEmpty(session.ServerName) || session.ServerName.Contains("(") || string.Equals(session.ServerName, session.Host, StringComparison.OrdinalIgnoreCase))
-                            ? string.Format("{0} {1}{2}", connIcon, string.IsNullOrEmpty(session.ServerName) ? session.Host : session.ServerName, pingStr)
-                            : string.Format("{0} {1} ({2}){3}", connIcon, session.ServerName, session.Host, pingStr);
-                        if (srvNode.Text != srvLabel)
-                        {
-                            srvNode.Text = srvLabel;
-                        }
-                        break;
-                    }
-                }
-            }
-            catch { }
+            // Server ping display in tree disabled per user request
         }
 
         private void OnTreeServersNodeClick(object sender, TreeNodeMouseClickEventArgs e)
@@ -4103,7 +4080,7 @@ namespace NyaaChatNative
                     "/clear", "/servers", "/list", "/server", "/export",
                     "/help", "/settings", "/modules", "/theme", "/powershell",
                     "/terminal", "/query", "/msg", "/away", "/back", "/chat",
-                    "/cls", "/restart", "/raw", "/ping", "/112", "/report",
+                    "/cls", "/restart", "/raw", "/ping",
                     "/nickpass", "/identify", "/register", "/unregister",
                     "/ignore", "/unignore", "/ignorelist", "/highlight", "/hl", "/find", "/search"
                 };
@@ -4280,7 +4257,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgHeader,
                     ForeColor = this.ColTextSecondary,
-                    Font = new Font("맑은 고딕", 8.5f),
+                    Font = CreateUiFont( 8.5f),
                     TextAlign = ContentAlignment.MiddleLeft,
                     Cursor = Cursors.Hand,
                     Margin = new Padding(0, 2, 0, 2)
@@ -4306,7 +4283,7 @@ namespace NyaaChatNative
                         FlatStyle = FlatStyle.Flat,
                         BackColor = isActive ? Color.FromArgb(14, 116, 144) : Color.FromArgb(15, 23, 42),
                         ForeColor = isActive ? Color.White : Color.FromArgb(56, 189, 248),
-                        Font = new Font("맑은 고딕", 9.2f, FontStyle.Bold),
+                        Font = CreateUiFont( 9.2f, FontStyle.Bold),
                         TextAlign = ContentAlignment.MiddleLeft,
                         Padding = new Padding(6, 0, 4, 0),
                         Cursor = Cursors.Hand,
@@ -4617,7 +4594,6 @@ namespace NyaaChatNative
         public void UpdateHeaderAndModuleBar()
         {
             if (this.btnChannelTopicEdit != null) this.btnChannelTopicEdit.Visible = !this.IsTerminalViewActive;
-            if (this.btnReport112 != null) this.btnReport112.Visible = !this.IsTerminalViewActive;
             if (this.btnSplitToggle != null) this.btnSplitToggle.Visible = !this.IsTerminalViewActive;
             if (this.btnTermClear != null) this.btnTermClear.Visible = this.IsTerminalViewActive;
             if (this.btnTermRestart != null) this.btnTermRestart.Visible = this.IsTerminalViewActive;
@@ -4649,7 +4625,7 @@ namespace NyaaChatNative
                     Text = Tr("[파워쉘 빠른 실행]:", "[PowerShell Quick]:"),
                     AutoSize = true,
                     ForeColor = Color.FromArgb(56, 189, 248),
-                    Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                    Font = CreateUiFont( 8.8f, FontStyle.Bold),
                     Margin = new Padding(2, 5, 6, 0)
                 };
                 this.serverExtModuleBar.Controls.Add(termBadge);
@@ -4668,7 +4644,7 @@ namespace NyaaChatNative
                             FlatStyle = FlatStyle.Flat,
                             BackColor = Color.FromArgb(14, 116, 144),
                             ForeColor = Color.White,
-                            Font = new Font("맑은 고딕", 8.2f, FontStyle.Bold),
+                            Font = CreateUiFont( 8.2f, FontStyle.Bold),
                             Cursor = Cursors.Hand,
                             Margin = new Padding(2, 1, 4, 1)
                         };
@@ -4697,7 +4673,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextSecondary,
-                    Font = new Font("맑은 고딕", 8.2f),
+                    Font = CreateUiFont( 8.2f),
                     Cursor = Cursors.Hand,
                     Margin = new Padding(4, 1, 2, 1)
                 };
@@ -4755,7 +4731,7 @@ namespace NyaaChatNative
                     Text = string.Format(Tr("[{0} 전용 확장]:", "[{0} Extensions]:"), this.ActiveSession.ServerName),
                     AutoSize = true,
                     ForeColor = this.ColTextSystem,
-                    Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                    Font = CreateUiFont( 8.8f, FontStyle.Bold),
                     Margin = new Padding(2, 5, 6, 0)
                 };
                 this.serverExtModuleBar.Controls.Add(badge);
@@ -4771,7 +4747,7 @@ namespace NyaaChatNative
                         FlatStyle = FlatStyle.Flat,
                         BackColor = this.ColBgHeader,
                         ForeColor = this.ColTextPrimary,
-                        Font = new Font("맑은 고딕", 8.2f),
+                        Font = CreateUiFont( 8.2f),
                         Cursor = Cursors.Hand,
                         Margin = new Padding(2, 1, 4, 1)
                     };
@@ -4794,7 +4770,7 @@ namespace NyaaChatNative
                             FlatStyle = FlatStyle.Flat,
                             BackColor = this.ColAccent,
                             ForeColor = Color.White,
-                            Font = new Font("맑은 고딕", 8.2f, FontStyle.Bold),
+                            Font = CreateUiFont( 8.2f, FontStyle.Bold),
                             Cursor = Cursors.Hand,
                             Margin = new Padding(2, 1, 4, 1)
                         };
@@ -4817,7 +4793,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextSecondary,
-                    Font = new Font("맑은 고딕", 8.2f),
+                    Font = CreateUiFont( 8.2f),
                     Cursor = Cursors.Hand,
                     Margin = new Padding(4, 1, 2, 1)
                 };
@@ -5679,10 +5655,9 @@ namespace NyaaChatNative
             {
                 if (this.ActiveSession != null && this.ActiveSession.IsConnected)
                 {
-                    string pingMsg = this.ActiveSession.PingMs >= 0
-                        ? string.Format(Tr("* [{0}] 지연 시간(RTT): {1}ms", "* [{0}] Latency (RTT): {1}ms"), this.ActiveSession.Host, this.ActiveSession.PingMs)
-                        : string.Format(Tr("* [{0}] 지연 시간 측정 중...", "* [{0}] Measuring latency..."), this.ActiveSession.Host);
-                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, pingMsg);
+                    Dictionary<string, object> p = new Dictionary<string, object>();
+                    p["t"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    this.ActiveSession.Emit("client_ping", p);
                 }
                 return;
             }
@@ -5904,11 +5879,6 @@ namespace NyaaChatNative
                     { "arg1", arg1 },
                     { "arg2", arg2 }
                 });
-                return;
-            }
-            if (cmd == "112" || cmd == "report")
-            {
-                PromptReport112Dialog();
                 return;
             }
             if (cmd == "clear")
@@ -6370,7 +6340,7 @@ namespace NyaaChatNative
                                   "You are about to open an external link in your web browser.\r\nPlease verify that the destination URL is trustworthy."),
                         Location = new Point(18, 14),
                         Size = new Size(430, 38),
-                        Font = new Font("맑은 고딕", 9.2f, FontStyle.Bold),
+                        Font = CreateUiFont( 9.2f, FontStyle.Bold),
                         ForeColor = this.ColTextPrimary
                     };
 
@@ -6402,7 +6372,7 @@ namespace NyaaChatNative
                         FlatStyle = FlatStyle.Flat,
                         BackColor = this.ColAccent,
                         ForeColor = Color.White,
-                        Font = new Font("맑은 고딕", 9f, FontStyle.Bold),
+                        Font = CreateUiFont( 9f, FontStyle.Bold),
                         DialogResult = DialogResult.OK
                     };
 
@@ -6454,7 +6424,7 @@ namespace NyaaChatNative
                 sb.AppendLine("• /mode [+ntpsmikl] [args] : Set channel modes (e.g. /mode +k 1234, /mode +v nick)");
                 sb.AppendLine("• /invite <nick> : Invite user  |  /op · /deop · /kick <nick> : Channel Op controls");
                 sb.AppendLine("• /whois <nick> : Query user info  |  /me <action> : Send action message");
-                sb.AppendLine("• /112 (or /report) : Report abuse  |  /export : Open logs folder  |  /clear : Clear chat");
+                sb.AppendLine("• /export : Open logs folder  |  /clear : Clear chat");
                 sb.AppendLine("• /settings (or /config, F10) : Open All-in-One Integrated Settings Center");
                 sb.AppendLine("• /modules (or /module) : Open Server Modules Manager (Add/Import/Toggle/Edit)");
                 sb.AppendLine("• /theme (or /color, /font) : Open Color Palette & Font Customizer");
@@ -6493,7 +6463,7 @@ namespace NyaaChatNative
                 sb.AppendLine("• /mode [+ntpsmikl] [옵션] : 채널 모드 변경 (예: /mode +k 1234, /mode +m, /mode +v 닉네임)");
                 sb.AppendLine("• /invite <닉네임> : 현재 채널로 초대  |  /op · /deop · /kick <닉네임> : 방장 권한");
                 sb.AppendLine("• /whois <닉네임> : 유저 정보 조회  |  /me <행동> : 행동 묘사");
-                sb.AppendLine("• /112 : 불법/유해 정보 신고  |  /export : 로그 폴더 열기  |  /clear : 화면 지우기");
+                sb.AppendLine("• /export : 로그 폴더 열기  |  /clear : 화면 지우기");
                 sb.AppendLine("• /nickpass <암호> : 닉네임 비밀번호 등록/변경  |  /identify <암호> : 본인 인증 (사칭 방어)");
                 sb.AppendLine("• /settings (또는 /설정, F10) : 설정창 열기 (간편설정 · 고급설정)");
                 sb.AppendLine("• /modules (또는 /모듈) : 서버별 확장 모듈 추가 · 가져오기 · 켜기/끄기 관리창 열기");
@@ -6564,7 +6534,7 @@ namespace NyaaChatNative
                 TextBox tUrl = new TextBox { Text = "https://", Location = new Point(16, 40), Width = 370, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
 
                 Label l2 = new Label { Text = Tr("입장할 채널명:", "Channel to join:"), Location = new Point(16, 76), AutoSize = true };
-                TextBox tChan = new TextBox { Text = "#소드걸스", Location = new Point(16, 98), Width = 200, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
+                TextBox tChan = new TextBox { Text = "#자유대화", Location = new Point(16, 98), Width = 200, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
 
                 Button bOk = new Button
                 {
@@ -6681,8 +6651,8 @@ namespace NyaaChatNative
                 dlg.ForeColor = this.ColTextPrimary;
                 ApplyWindowTitleBarTheme(dlg);
 
-                Label lCh = new Label { Text = Tr("채널 이름 (# 자동 부착):", "Channel Name (auto-prefixed with #):"), Location = new Point(16, 16), AutoSize = true, Font = new Font("맑은 고딕", 9f, FontStyle.Bold) };
-                TextBox tCh = new TextBox { Text = "#소드걸스", Location = new Point(16, 38), Width = 390, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
+                Label lCh = new Label { Text = Tr("채널 이름 (# 자동 부착):", "Channel Name (auto-prefixed with #):"), Location = new Point(16, 16), AutoSize = true, Font = CreateUiFont( 9f, FontStyle.Bold) };
+                TextBox tCh = new TextBox { Text = "#자유대화", Location = new Point(16, 38), Width = 390, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
 
                 Label lTopic = new Label { Text = Tr("채널 토픽 (방 주제, 신설 시 적용):", "Channel Topic (applied when creating new channel):"), Location = new Point(16, 72), AutoSize = true };
                 TextBox tTopic = new TextBox { Text = "", Location = new Point(16, 94), Width = 390, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
@@ -6732,7 +6702,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColAccent,
                     ForeColor = Color.White,
-                    Font = new Font("맑은 고딕", 9.2f, FontStyle.Bold)
+                    Font = CreateUiFont( 9.2f, FontStyle.Bold)
                 };
                 bOk.Click += delegate
                 {
@@ -6793,10 +6763,10 @@ namespace NyaaChatNative
                     Location = new Point(16, 14),
                     AutoSize = true,
                     ForeColor = this.ColTextSystem,
-                    Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold)
+                    Font = CreateUiFont( 8.8f, FontStyle.Bold)
                 };
 
-                Label lTopic = new Label { Text = Tr("채널 토픽 (방 주제):", "Channel Topic:"), Location = new Point(16, 42), AutoSize = true, Font = new Font("맑은 고딕", 9f, FontStyle.Bold) };
+                Label lTopic = new Label { Text = Tr("채널 토픽 (방 주제):", "Channel Topic:"), Location = new Point(16, 42), AutoSize = true, Font = CreateUiFont( 9f, FontStyle.Bold) };
                 TextBox tTopic = new TextBox { Text = currentTopic, Location = new Point(16, 64), Width = 410, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
 
                 GroupBox grpModes = new GroupBox
@@ -6877,7 +6847,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColAccent,
                     ForeColor = Color.White,
-                    Font = new Font("맑은 고딕", 9.2f, FontStyle.Bold)
+                    Font = CreateUiFont( 9.2f, FontStyle.Bold)
                 };
                 Button bCancel = new Button
                 {
@@ -6915,76 +6885,6 @@ namespace NyaaChatNative
                 dlg.AcceptButton = bOk;
                 dlg.CancelButton = bCancel;
                 dlg.Controls.AddRange(new Control[] { lBadge, lTopic, tTopic, grpModes, bOk, bCancel });
-                dlg.ShowDialog(this);
-            }
-        }
-
-        private void PromptReport112Dialog()
-        {
-            if (this.ActiveSession == null) return;
-            List<ChatMessageItem> candidates = new List<ChatMessageItem>();
-            foreach (ChatMessageItem m in this.ActiveSession.GetOrCreateRoomHistory(this.ActiveRoomId))
-            {
-                if (m.Type != "system") candidates.Add(m);
-            }
-            if (candidates.Count == 0)
-            {
-                MessageBox.Show(
-                    Tr("현재 채널에 신고할 수 있는 최근 대화 내역이 없습니다.", "There are no recent messages to report in this channel."),
-                    Tr("신고 안내", "Report Notice"),
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
-                return;
-            }
-
-            using (Form dlg = new Form())
-            {
-                dlg.Text = Tr("유해/불법 메시지 신고 (/112)", "Report Harmful/Illegal Message (/112)");
-                dlg.Size = new Size(460, 320);
-                dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
-                dlg.StartPosition = FormStartPosition.CenterParent;
-                dlg.BackColor = this.ColBgWindow;
-                dlg.ForeColor = this.ColTextPrimary;
-                ApplyWindowTitleBarTheme(dlg);
-
-                Label l1 = new Label { Text = Tr("신고할 메시지 선택:", "Select message to report:"), Location = new Point(16, 14), AutoSize = true };
-                ListBox lb = new ListBox { Location = new Point(16, 36), Size = new Size(410, 140), BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
-                for (int i = candidates.Count - 1; i >= 0 && lb.Items.Count < 30; i--)
-                {
-                    ChatMessageItem m = candidates[i];
-                    lb.Items.Add(string.Format("[{0}] {1} (ID:{2})", m.SenderNick, m.Content, m.Id));
-                }
-                if (lb.Items.Count > 0) lb.SelectedIndex = 0;
-
-                Label l2 = new Label { Text = Tr("신고 사유:", "Reason for report:"), Location = new Point(16, 186), AutoSize = true };
-                TextBox tReason = new TextBox { Text = Tr("불법 촬영물 / 도배 / 욕설", "Illegal content / Spam / Abuse"), Location = new Point(16, 208), Width = 410, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
-
-                Button bSubmit = new Button
-                {
-                    Text = Tr("신고 접수", "Submit Report"),
-                    Location = new Point(16, 242),
-                    Size = new Size(410, 32),
-                    FlatStyle = FlatStyle.Flat,
-                    BackColor = Color.FromArgb(220, 38, 38),
-                    ForeColor = Color.White
-                };
-                bSubmit.Click += delegate
-                {
-                    if (lb.SelectedIndex >= 0)
-                    {
-                        ChatMessageItem target = candidates[candidates.Count - 1 - lb.SelectedIndex];
-                        this.ActiveSession.Emit("submit_report", new Dictionary<string, object>
-                        {
-                            { "roomId", this.ActiveRoomId },
-                            { "messageId", target.Id },
-                            { "reason", tReason.Text.Trim() },
-                            { "details", tReason.Text.Trim() }
-                        });
-                        AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, Tr("* 신고가 정상적으로 서버 관리자에게 접수되었습니다.", "* Your report has been submitted to the server administrators."));
-                        dlg.Close();
-                    }
-                };
-                dlg.Controls.AddRange(new Control[] { l1, lb, l2, tReason, bSubmit });
                 dlg.ShowDialog(this);
             }
         }
@@ -7062,7 +6962,7 @@ namespace NyaaChatNative
                 {
                     Location = new Point(14, 14),
                     Size = new Size(176, 20),
-                    Font = new Font("맑은 고딕", 9.5f, FontStyle.Bold),
+                    Font = CreateUiFont( 9.5f, FontStyle.Bold),
                     ForeColor = this.ColTextSecondary
                 };
 
@@ -7073,7 +6973,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     TextAlign = ContentAlignment.MiddleLeft,
                     Padding = new Padding(10, 0, 0, 0),
-                    Font = new Font("맑은 고딕", 9.5f, FontStyle.Bold),
+                    Font = CreateUiFont( 9.5f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnNavQuick.FlatAppearance.BorderSize = 1;
@@ -7085,7 +6985,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     TextAlign = ContentAlignment.MiddleLeft,
                     Padding = new Padding(10, 0, 0, 0),
-                    Font = new Font("맑은 고딕", 9.2f, FontStyle.Bold),
+                    Font = CreateUiFont( 9.2f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnNavAdvToggle.FlatAppearance.BorderSize = 1;
@@ -7108,7 +7008,7 @@ namespace NyaaChatNative
                         FlatStyle = FlatStyle.Flat,
                         TextAlign = ContentAlignment.MiddleLeft,
                         Padding = new Padding(12, 0, 0, 0),
-                        Font = new Font("맑은 고딕", 8.8f, FontStyle.Regular),
+                        Font = CreateUiFont( 8.8f, FontStyle.Regular),
                         Cursor = Cursors.Hand
                     };
                     b.FlatAppearance.BorderSize = 1;
@@ -7142,7 +7042,7 @@ namespace NyaaChatNative
                     AutoSize = false,
                     AutoEllipsis = true,
                     TextAlign = ContentAlignment.MiddleLeft,
-                    Font = new Font("맑은 고딕", 8.6f),
+                    Font = CreateUiFont( 8.6f),
                     ForeColor = this.ColTextSecondary
                 };
 
@@ -7153,7 +7053,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColAccent,
                     ForeColor = Color.White,
-                    Font = new Font("맑은 고딕", 9.2f, FontStyle.Bold),
+                    Font = CreateUiFont( 9.2f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnSaveAll.FlatAppearance.BorderSize = 0;
@@ -7165,7 +7065,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgHeader,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f),
+                    Font = CreateUiFont( 9f),
                     Cursor = Cursors.Hand
                 };
                 btnCloseDlg.FlatAppearance.BorderColor = this.ColBorder;
@@ -7219,7 +7119,7 @@ namespace NyaaChatNative
                         advBtns[i].BackColor = sel ? this.ColAccent : this.ColBgSidebar;
                         advBtns[i].ForeColor = sel ? Color.White : this.ColTextPrimary;
                         advBtns[i].FlatAppearance.BorderColor = sel ? this.ColAccent : this.ColBorder;
-                        advBtns[i].Font = new Font("맑은 고딕", 8.8f, sel ? FontStyle.Bold : FontStyle.Regular);
+                        advBtns[i].Font = CreateUiFont( 8.8f, sel ? FontStyle.Bold : FontStyle.Regular);
                     }
                 };
 
@@ -7280,7 +7180,7 @@ namespace NyaaChatNative
                     Size = new Size(584, 22),
                     AutoSize = false,
                     AutoEllipsis = true,
-                    Font = new Font("맑은 고딕", 9.5f, FontStyle.Bold),
+                    Font = CreateUiFont( 9.5f, FontStyle.Bold),
                     ForeColor = this.ColTextSystem
                 };
 
@@ -7289,10 +7189,10 @@ namespace NyaaChatNative
                     Location = new Point(16, 38),
                     Size = new Size(584, 108),
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
 
-                Label lLang = new Label { Location = new Point(14, 30), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lLang = new Label { Location = new Point(14, 30), AutoSize = true, Font = CreateUiFont( 9f) };
                 ThemedComboBox cbLang = new ThemedComboBox
                 {
                     DropDownStyle = ComboBoxStyle.DropDownList,
@@ -7300,13 +7200,13 @@ namespace NyaaChatNative
                     Width = 172,
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
                 cbLang.Items.Add("한국어 (Korean)");
                 cbLang.Items.Add("English (영어)");
                 cbLang.SelectedIndex = this.IsEnglish ? 1 : 0;
 
-                Label lNick = new Label { Location = new Point(296, 30), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lNick = new Label { Location = new Point(296, 30), AutoSize = true, Font = CreateUiFont( 9f) };
                 TextBox txtNick = new TextBox
                 {
                     Text = !string.IsNullOrEmpty(this.GlobalNickname) ? this.GlobalNickname : GetIni("User", "DefaultNickname", "네무로"),
@@ -7315,7 +7215,7 @@ namespace NyaaChatNative
                     MaxLength = 16,
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9.2f)
+                    Font = CreateUiFont( 9.2f)
                 };
 
                 CheckBox chkApplyNickLive = new CheckBox
@@ -7323,7 +7223,7 @@ namespace NyaaChatNative
                     Checked = true,
                     Location = new Point(16, 68),
                     AutoSize = true,
-                    Font = new Font("맑은 고딕", 8.8f),
+                    Font = CreateUiFont( 8.8f),
                     ForeColor = this.ColTextSecondary
                 };
 
@@ -7332,7 +7232,7 @@ namespace NyaaChatNative
                     Checked = GetIni("Server", "AutoConnect", "true").ToLower() == "true",
                     Location = new Point(310, 68),
                     AutoSize = true,
-                    Font = new Font("맑은 고딕", 8.8f),
+                    Font = CreateUiFont( 8.8f),
                     ForeColor = this.ColTextSecondary
                 };
 
@@ -7345,10 +7245,10 @@ namespace NyaaChatNative
                     Location = new Point(16, 156),
                     Size = new Size(584, 114),
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
 
-                Label lActiveTheme = new Label { Location = new Point(14, 30), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lActiveTheme = new Label { Location = new Point(14, 30), AutoSize = true, Font = CreateUiFont( 9f) };
                 ThemedComboBox cbActiveTheme = new ThemedComboBox
                 {
                     DropDownStyle = ComboBoxStyle.DropDownList,
@@ -7356,7 +7256,7 @@ namespace NyaaChatNative
                     Width = 182,
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f)
+                    Font = CreateUiFont( 9f)
                 };
                 Action populateThemeCombo = delegate
                 {
@@ -7383,13 +7283,13 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColAccent,
                     ForeColor = Color.White,
-                    Font = new Font("맑은 고딕", 8.6f, FontStyle.Bold),
+                    Font = CreateUiFont( 8.6f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnGoColorPalette.FlatAppearance.BorderSize = 0;
                 btnGoColorPalette.Click += delegate { switchPage(2); };
 
-                Label lFName = new Label { Location = new Point(14, 70), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lFName = new Label { Location = new Point(14, 70), AutoSize = true, Font = CreateUiFont( 9f) };
                 ThemedComboBox cbFName = new ThemedComboBox
                 {
                     DropDownStyle = ComboBoxStyle.DropDownList,
@@ -7397,9 +7297,9 @@ namespace NyaaChatNative
                     Width = 158,
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f)
+                    Font = CreateUiFont( 9f)
                 };
-                string[] prefFonts = new string[] { "맑은 고딕", "굴림", "굴림체", "돋움", "돋움체", "바탕", "나눔고딕", "D2Coding", "Consolas", "Segoe UI", "Tahoma" };
+                string[] prefFonts = new string[] { GetSystemDefaultFontName(), "Pretendard", "Noto Sans KR", "굴림", "돋움", "바탕", "D2Coding", "Consolas", "Segoe UI", "Tahoma" };
                 HashSet<string> seenFonts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (string pf in prefFonts) { cbFName.Items.Add(pf); seenFonts.Add(pf); }
                 try
@@ -7416,7 +7316,7 @@ namespace NyaaChatNative
                 int fSel = cbFName.FindStringExact(this.CurrentFontName);
                 cbFName.SelectedIndex = fSel >= 0 ? fSel : 0;
 
-                Label lFSize = new Label { Location = new Point(234, 70), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lFSize = new Label { Location = new Point(234, 70), AutoSize = true, Font = CreateUiFont( 9f) };
                 NumericUpDown numFSize = new NumericUpDown
                 {
                     Minimum = 8,
@@ -7426,10 +7326,10 @@ namespace NyaaChatNative
                     Width = 52,
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f)
+                    Font = CreateUiFont( 9f)
                 };
 
-                Label lFWeight = new Label { Location = new Point(344, 70), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lFWeight = new Label { Location = new Point(344, 70), AutoSize = true, Font = CreateUiFont( 9f) };
                 ThemedComboBox cbFWeight = new ThemedComboBox
                 {
                     DropDownStyle = ComboBoxStyle.DropDownList,
@@ -7437,7 +7337,7 @@ namespace NyaaChatNative
                     Width = 170,
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.8f)
+                    Font = CreateUiFont( 8.8f)
                 };
                 int initFWeightIdx = this.CurrentFontWeightMode == "bold" ? 1 : (this.CurrentFontWeightMode == "light" ? 2 : 0);
 
@@ -7451,7 +7351,7 @@ namespace NyaaChatNative
                     Location = new Point(16, 280),
                     Size = new Size(584, 134),
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
 
                 CheckBox chkAlwaysOnTop = new CheckBox
@@ -7459,7 +7359,7 @@ namespace NyaaChatNative
                     Checked = this.TopMost,
                     Location = new Point(16, 28),
                     AutoSize = true,
-                    Font = new Font("맑은 고딕", 8.8f)
+                    Font = CreateUiFont( 8.8f)
                 };
 
                 CheckBox chkEnableSounds = new CheckBox
@@ -7467,7 +7367,7 @@ namespace NyaaChatNative
                     Checked = GetIni("Sounds", "EnableSounds", "true").ToLower() != "false",
                     Location = new Point(214, 28),
                     AutoSize = true,
-                    Font = new Font("맑은 고딕", 8.8f)
+                    Font = CreateUiFont( 8.8f)
                 };
 
                 CheckBox chkWarnExternalLinks = new CheckBox
@@ -7475,7 +7375,7 @@ namespace NyaaChatNative
                     Checked = GetIni("Security", "SkipLinkWarning", "false").ToLowerInvariant() != "true",
                     Location = new Point(362, 28),
                     AutoSize = true,
-                    Font = new Font("맑은 고딕", 8.8f)
+                    Font = CreateUiFont( 8.8f)
                 };
 
                 Button btnQuickBossHide = new Button
@@ -7485,7 +7385,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.6f, FontStyle.Bold),
+                    Font = CreateUiFont( 8.6f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnQuickBossHide.FlatAppearance.BorderColor = this.ColBorder;
@@ -7502,7 +7402,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.6f, FontStyle.Bold),
+                    Font = CreateUiFont( 8.6f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnQuickOpenFolder.FlatAppearance.BorderColor = this.ColBorder;
@@ -7515,7 +7415,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.6f, FontStyle.Bold),
+                    Font = CreateUiFont( 8.6f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnQuickScripts.FlatAppearance.BorderColor = this.ColBorder;
@@ -7528,7 +7428,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextSystem,
-                    Font = new Font("맑은 고딕", 8.6f, FontStyle.Bold),
+                    Font = CreateUiFont( 8.6f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnQuickModules.FlatAppearance.BorderColor = this.ColAccent;
@@ -7541,7 +7441,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.6f, FontStyle.Bold),
+                    Font = CreateUiFont( 8.6f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnQuickSounds.FlatAppearance.BorderColor = this.ColBorder;
@@ -7553,7 +7453,7 @@ namespace NyaaChatNative
                     Size = new Size(552, 20),
                     AutoSize = false,
                     AutoEllipsis = true,
-                    Font = new Font("맑은 고딕", 8.4f),
+                    Font = CreateUiFont( 8.4f),
                     ForeColor = this.ColTextSecondary
                 };
 
@@ -7570,7 +7470,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgHeader,
                     ForeColor = this.ColTextSystem,
-                    Font = new Font("맑은 고딕", 9.2f, FontStyle.Bold),
+                    Font = CreateUiFont( 9.2f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnExpandAdvBottom.FlatAppearance.BorderColor = this.ColAccent;
@@ -7594,10 +7494,10 @@ namespace NyaaChatNative
                     Location = new Point(16, 10),
                     Size = new Size(584, 134),
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
 
-                Label lSrvUrl = new Label { Location = new Point(16, 24), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lSrvUrl = new Label { Location = new Point(16, 24), AutoSize = true, Font = CreateUiFont( 9f) };
                 TextBox txtSrvUrl = new TextBox
                 {
                     Text = GetIni("Server", "Url", "https://nemulo.duckdns.org"),
@@ -7605,10 +7505,10 @@ namespace NyaaChatNative
                     Width = 394,
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9.2f)
+                    Font = CreateUiFont( 9.2f)
                 };
 
-                Label lDefChan = new Label { Location = new Point(16, 54), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lDefChan = new Label { Location = new Point(16, 54), AutoSize = true, Font = CreateUiFont( 9f) };
                 TextBox txtDefChan = new TextBox
                 {
                     Text = GetIni("Server", "DefaultChannel", "#자유대화"),
@@ -7616,10 +7516,10 @@ namespace NyaaChatNative
                     Width = 210,
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9.2f)
+                    Font = CreateUiFont( 9.2f)
                 };
 
-                Label lExtraSrvs = new Label { Location = new Point(16, 84), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lExtraSrvs = new Label { Location = new Point(16, 84), AutoSize = true, Font = CreateUiFont( 9f) };
                 TextBox txtExtraSrvs = new TextBox
                 {
                     Text = GetIni("Server", "AutoConnectServers", GetIni("Server", "ExtraServers", "")),
@@ -7627,7 +7527,7 @@ namespace NyaaChatNative
                     Width = 394,
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f)
+                    Font = CreateUiFont( 9f)
                 };
 
                 Label lExtraHint = new Label
@@ -7635,7 +7535,7 @@ namespace NyaaChatNative
                     Location = new Point(172, 108),
                     Size = new Size(394, 20),
                     AutoSize = false,
-                    Font = new Font("맑은 고딕", 8.2f),
+                    Font = CreateUiFont( 8.2f),
                     ForeColor = this.ColTextSecondary
                 };
 
@@ -7648,14 +7548,14 @@ namespace NyaaChatNative
                     Location = new Point(16, 150),
                     Size = new Size(584, 160),
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
 
                 Label lblAutoJoinTitle = new Label
                 {
                     Location = new Point(16, 20),
                     Size = new Size(550, 18),
-                    Font = new Font("맑은 고딕", 8.8f),
+                    Font = CreateUiFont( 8.8f),
                     ForeColor = this.ColTextSecondary
                 };
 
@@ -7689,7 +7589,7 @@ namespace NyaaChatNative
                 {
                     Location = new Point(16, 134),
                     Size = new Size(550, 20),
-                    Font = new Font("맑은 고딕", 8.2f),
+                    Font = CreateUiFont( 8.2f),
                     ForeColor = this.ColTextSystem
                 };
 
@@ -7702,10 +7602,10 @@ namespace NyaaChatNative
                     Location = new Point(16, 318),
                     Size = new Size(584, 150),
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
 
-                Label lQuitMsg = new Label { Location = new Point(16, 26), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lQuitMsg = new Label { Location = new Point(16, 26), AutoSize = true, Font = CreateUiFont( 9f) };
                 TextBox txtQuitMsg = new TextBox
                 {
                     Text = GetIni("User", "QuitMessage", "NyaaChat Native - 좋은 하루 되세요!"),
@@ -7713,10 +7613,10 @@ namespace NyaaChatNative
                     Width = 394,
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f)
+                    Font = CreateUiFont( 9f)
                 };
 
-                Label lUserId = new Label { Location = new Point(16, 64), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lUserId = new Label { Location = new Point(16, 64), AutoSize = true, Font = CreateUiFont( 9f) };
                 TextBox txtUserId = new TextBox
                 {
                     Text = this.GlobalUserId,
@@ -7734,7 +7634,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.6f),
+                    Font = CreateUiFont( 8.6f),
                     Cursor = Cursors.Hand
                 };
                 btnRegenUserId.FlatAppearance.BorderColor = this.ColBorder;
@@ -7745,7 +7645,7 @@ namespace NyaaChatNative
                     SetIniValue("User", "UserId", this.GlobalUserId, true);
                 };
 
-                Label lNickPass = new Label { Location = new Point(16, 106), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lNickPass = new Label { Location = new Point(16, 106), AutoSize = true, Font = CreateUiFont( 9f) };
                 TextBox txtNickPass = new TextBox
                 {
                     Text = !string.IsNullOrEmpty(this.GlobalNickPassword) ? this.GlobalNickPassword : GetIni("User", "NickPassword", ""),
@@ -7760,7 +7660,7 @@ namespace NyaaChatNative
                 {
                     Location = new Point(402, 104),
                     Size = new Size(164, 20),
-                    Font = new Font("맑은 고딕", 8.2f),
+                    Font = CreateUiFont( 8.2f),
                     ForeColor = this.ColTextSecondary
                 };
 
@@ -7780,7 +7680,7 @@ namespace NyaaChatNative
                     Location = new Point(16, 14),
                     Size = new Size(584, 446),
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
 
                 string[][] colorSlots = new string[][] {
@@ -7861,7 +7761,7 @@ namespace NyaaChatNative
                     Size = new Size(242, 356),
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.8f),
+                    Font = CreateUiFont( 8.8f),
                     IntegralHeight = false,
                     ItemHeight = 20
                 };
@@ -7887,7 +7787,7 @@ namespace NyaaChatNative
                     Size = new Size(302, 20),
                     AutoSize = false,
                     AutoEllipsis = true,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold),
+                    Font = CreateUiFont( 9f, FontStyle.Bold),
                     ForeColor = this.ColTextSystem
                 };
 
@@ -7914,7 +7814,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.4f),
+                    Font = CreateUiFont( 8.4f),
                     Cursor = Cursors.Hand
                 };
                 btnApplyHex.FlatAppearance.BorderColor = this.ColBorder;
@@ -7926,7 +7826,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColAccent,
                     ForeColor = Color.White,
-                    Font = new Font("맑은 고딕", 8.4f, FontStyle.Bold),
+                    Font = CreateUiFont( 8.4f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnOpenColorDialog.FlatAppearance.BorderSize = 0;
@@ -7937,7 +7837,7 @@ namespace NyaaChatNative
                     Size = new Size(302, 18),
                     AutoSize = false,
                     AutoEllipsis = true,
-                    Font = new Font("맑은 고딕", 8.4f),
+                    Font = CreateUiFont( 8.4f),
                     ForeColor = this.ColTextSecondary
                 };
 
@@ -7966,7 +7866,7 @@ namespace NyaaChatNative
                     Location = new Point(6, 4),
                     AutoSize = true,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.4f, FontStyle.Bold)
+                    Font = CreateUiFont( 8.4f, FontStyle.Bold)
                 };
                 pnlMiniPreviewHeader.Controls.Add(lblMiniHeader);
 
@@ -7995,7 +7895,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.6f),
+                    Font = CreateUiFont( 8.6f),
                     Cursor = Cursors.Hand
                 };
                 btnWinFontDlg.FlatAppearance.BorderColor = this.ColBorder;
@@ -8007,7 +7907,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold),
+                    Font = CreateUiFont( 9f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnSaveAsNew.FlatAppearance.BorderColor = this.ColAccent;
@@ -8030,10 +7930,10 @@ namespace NyaaChatNative
                     Location = new Point(16, 14),
                     Size = new Size(584, 206),
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
 
-                Label lWinTitle = new Label { Location = new Point(16, 32), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lWinTitle = new Label { Location = new Point(16, 32), AutoSize = true, Font = CreateUiFont( 9f) };
                 TextBox txtWinTitle = new TextBox
                 {
                     Text = GetIni("Window", "Title", "Nyaa Chat Native Multi-Server Client"),
@@ -8041,7 +7941,7 @@ namespace NyaaChatNative
                     Width = 394,
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9.2f)
+                    Font = CreateUiFont( 9.2f)
                 };
 
                 CheckBox chkMinToTray = new CheckBox
@@ -8049,7 +7949,7 @@ namespace NyaaChatNative
                     Checked = GetIni("Window", "MinimizeToTrayOnClose", "false").ToLower() == "true",
                     Location = new Point(16, 68),
                     AutoSize = true,
-                    Font = new Font("맑은 고딕", 8.8f)
+                    Font = CreateUiFont( 8.8f)
                 };
 
                 CheckBox chkShowTs = new CheckBox
@@ -8057,10 +7957,10 @@ namespace NyaaChatNative
                     Checked = GetIni("Theme", "ShowTimestamps", "true").ToLower() != "false",
                     Location = new Point(16, 98),
                     AutoSize = true,
-                    Font = new Font("맑은 고딕", 8.8f)
+                    Font = CreateUiFont( 8.8f)
                 };
 
-                Label lWinOpacity = new Label { Location = new Point(16, 134), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lWinOpacity = new Label { Location = new Point(16, 134), AutoSize = true, Font = CreateUiFont( 9f) };
                 NumericUpDown numWinOpacity = new NumericUpDown
                 {
                     Minimum = 30,
@@ -8071,7 +7971,7 @@ namespace NyaaChatNative
                     Width = 76,
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f)
+                    Font = CreateUiFont( 9f)
                 };
 
                 Button btnAdvBossHide = new Button
@@ -8081,7 +7981,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                    Font = CreateUiFont( 8.8f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnAdvBossHide.FlatAppearance.BorderColor = this.ColBorder;
@@ -8097,7 +7997,7 @@ namespace NyaaChatNative
                     Size = new Size(552, 22),
                     AutoSize = false,
                     AutoEllipsis = true,
-                    Font = new Font("맑은 고딕", 8.5f),
+                    Font = CreateUiFont( 8.5f),
                     ForeColor = this.ColTextSystem
                 };
 
@@ -8111,10 +8011,10 @@ namespace NyaaChatNative
                     Location = new Point(16, 232),
                     Size = new Size(584, 178),
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
 
-                Label lLeftWidth = new Label { Location = new Point(16, 36), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lLeftWidth = new Label { Location = new Point(16, 36), AutoSize = true, Font = CreateUiFont( 9f) };
                 NumericUpDown numLeftWidth = new NumericUpDown
                 {
                     Minimum = 200,
@@ -8125,10 +8025,10 @@ namespace NyaaChatNative
                     Width = 80,
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f)
+                    Font = CreateUiFont( 9f)
                 };
 
-                Label lRightWidth = new Label { Location = new Point(16, 76), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
+                Label lRightWidth = new Label { Location = new Point(16, 76), AutoSize = true, Font = CreateUiFont( 9f) };
                 NumericUpDown numRightWidth = new NumericUpDown
                 {
                     Minimum = 170,
@@ -8139,7 +8039,7 @@ namespace NyaaChatNative
                     Width = 80,
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f)
+                    Font = CreateUiFont( 9f)
                 };
 
                 Button btnApplySplitNow = new Button
@@ -8149,7 +8049,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColAccent,
                     ForeColor = Color.White,
-                    Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                    Font = CreateUiFont( 8.8f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnApplySplitNow.FlatAppearance.BorderSize = 0;
@@ -8167,7 +8067,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.8f),
+                    Font = CreateUiFont( 8.8f),
                     Cursor = Cursors.Hand
                 };
                 btnResetSplitDef.FlatAppearance.BorderColor = this.ColBorder;
@@ -8197,7 +8097,7 @@ namespace NyaaChatNative
                     Location = new Point(16, 14),
                     Size = new Size(584, 248),
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
 
                 Label lblSoundNotice = new Label
@@ -8205,7 +8105,7 @@ namespace NyaaChatNative
                     Location = new Point(16, 26),
                     Size = new Size(310, 34),
                     AutoSize = false,
-                    Font = new Font("맑은 고딕", 8.4f),
+                    Font = CreateUiFont( 8.4f),
                     ForeColor = this.ColTextSecondary
                 };
 
@@ -8216,7 +8116,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.3f),
+                    Font = CreateUiFont( 8.3f),
                     Cursor = Cursors.Hand
                 };
                 btnOpenSoundsDir.FlatAppearance.BorderColor = this.ColBorder;
@@ -8229,7 +8129,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.3f),
+                    Font = CreateUiFont( 8.3f),
                     Cursor = Cursors.Hand
                 };
                 btnAddCustomWav.FlatAppearance.BorderColor = this.ColBorder;
@@ -8248,7 +8148,7 @@ namespace NyaaChatNative
                         Location = new Point(16, yBase + 4),
                         Size = new Size(150, 20),
                         AutoSize = false,
-                        Font = new Font("맑은 고딕", 8.8f)
+                        Font = CreateUiFont( 8.8f)
                     };
                     ThemedComboBox cb = new ThemedComboBox
                     {
@@ -8257,7 +8157,7 @@ namespace NyaaChatNative
                         Width = 280,
                         BackColor = this.ColBgInput,
                         ForeColor = this.ColTextPrimary,
-                        Font = new Font("맑은 고딕", 8.8f)
+                        Font = CreateUiFont( 8.8f)
                     };
                     cb.Items.Add(Tr("(사용 안 함)", "(Disabled)"));
                     string savedWav = GetIni("Sounds", sndKeys[i], "");
@@ -8275,7 +8175,7 @@ namespace NyaaChatNative
                         FlatStyle = FlatStyle.Flat,
                         BackColor = this.ColBgSidebar,
                         ForeColor = this.ColTextPrimary,
-                        Font = new Font("맑은 고딕", 8.4f),
+                        Font = CreateUiFont( 8.4f),
                         Cursor = Cursors.Hand
                     };
                     bTest.FlatAppearance.BorderColor = this.ColBorder;
@@ -8341,7 +8241,7 @@ namespace NyaaChatNative
                     Checked = GetIni("Sounds", "UseSystemBeepFallback", "false").ToLower() == "true",
                     Location = new Point(16, 212),
                     AutoSize = true,
-                    Font = new Font("맑은 고딕", 8.8f),
+                    Font = CreateUiFont( 8.8f),
                     ForeColor = this.ColTextSecondary
                 };
 
@@ -8352,7 +8252,7 @@ namespace NyaaChatNative
                     Location = new Point(16, 274),
                     Size = new Size(584, 118),
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
 
                 CheckBox chkSaveLogs = new CheckBox
@@ -8360,7 +8260,7 @@ namespace NyaaChatNative
                     Checked = GetIni("Logging", "SaveLogs", "true").ToLowerInvariant() == "true",
                     Location = new Point(16, 32),
                     AutoSize = true,
-                    Font = new Font("맑은 고딕", 8.8f)
+                    Font = CreateUiFont( 8.8f)
                 };
 
                 Button btnOpenLogsDir = new Button
@@ -8370,7 +8270,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.8f),
+                    Font = CreateUiFont( 8.8f),
                     Cursor = Cursors.Hand
                 };
                 btnOpenLogsDir.FlatAppearance.BorderColor = this.ColBorder;
@@ -8390,13 +8290,13 @@ namespace NyaaChatNative
                     Location = new Point(16, 14),
                     Size = new Size(584, 72),
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
 
-                Button btnDirRoot = new Button { Location = new Point(14, 28), Size = new Size(134, 30), FlatStyle = FlatStyle.Flat, BackColor = this.ColBgSidebar, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 8.5f), Cursor = Cursors.Hand };
-                Button btnDirThemes = new Button { Location = new Point(154, 28), Size = new Size(134, 30), FlatStyle = FlatStyle.Flat, BackColor = this.ColBgSidebar, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 8.5f), Cursor = Cursors.Hand };
-                Button btnDirScripts = new Button { Location = new Point(294, 28), Size = new Size(134, 30), FlatStyle = FlatStyle.Flat, BackColor = this.ColBgSidebar, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 8.5f), Cursor = Cursors.Hand };
-                Button btnDirModules = new Button { Location = new Point(434, 28), Size = new Size(134, 30), FlatStyle = FlatStyle.Flat, BackColor = this.ColBgSidebar, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 8.5f), Cursor = Cursors.Hand };
+                Button btnDirRoot = new Button { Location = new Point(14, 28), Size = new Size(134, 30), FlatStyle = FlatStyle.Flat, BackColor = this.ColBgSidebar, ForeColor = this.ColTextPrimary, Font = CreateUiFont( 8.5f), Cursor = Cursors.Hand };
+                Button btnDirThemes = new Button { Location = new Point(154, 28), Size = new Size(134, 30), FlatStyle = FlatStyle.Flat, BackColor = this.ColBgSidebar, ForeColor = this.ColTextPrimary, Font = CreateUiFont( 8.5f), Cursor = Cursors.Hand };
+                Button btnDirScripts = new Button { Location = new Point(294, 28), Size = new Size(134, 30), FlatStyle = FlatStyle.Flat, BackColor = this.ColBgSidebar, ForeColor = this.ColTextPrimary, Font = CreateUiFont( 8.5f), Cursor = Cursors.Hand };
+                Button btnDirModules = new Button { Location = new Point(434, 28), Size = new Size(134, 30), FlatStyle = FlatStyle.Flat, BackColor = this.ColBgSidebar, ForeColor = this.ColTextPrimary, Font = CreateUiFont( 8.5f), Cursor = Cursors.Hand };
                 btnDirRoot.FlatAppearance.BorderColor = this.ColBorder;
                 btnDirThemes.FlatAppearance.BorderColor = this.ColBorder;
                 btnDirScripts.FlatAppearance.BorderColor = this.ColBorder;
@@ -8413,7 +8313,7 @@ namespace NyaaChatNative
                     Location = new Point(16, 94),
                     Size = new Size(584, 366),
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
 
                 FlowLayoutPanel scriptTabBar = new FlowLayoutPanel
@@ -8444,7 +8344,7 @@ namespace NyaaChatNative
                     Size = new Size(334, 22),
                     AutoSize = false,
                     AutoEllipsis = true,
-                    Font = new Font("맑은 고딕", 8.5f),
+                    Font = CreateUiFont( 8.5f),
                     ForeColor = this.ColTextSecondary
                 };
 
@@ -8455,7 +8355,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColAccent,
                     ForeColor = Color.White,
-                    Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                    Font = CreateUiFont( 8.8f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnSaveScriptFile.FlatAppearance.BorderSize = 0;
@@ -8505,7 +8405,7 @@ namespace NyaaChatNative
                     Location = new Point(16, 14),
                     Size = new Size(584, 212),
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
 
                 ListBox lbModules = new ListBox
@@ -8514,7 +8414,7 @@ namespace NyaaChatNative
                     Size = new Size(366, 142),
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.8f),
+                    Font = CreateUiFont( 8.8f),
                     IntegralHeight = false,
                     ItemHeight = 20
                 };
@@ -8526,7 +8426,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColAccent,
                     ForeColor = Color.White,
-                    Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                    Font = CreateUiFont( 8.8f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnAddModuleWizard.FlatAppearance.BorderSize = 0;
@@ -8538,7 +8438,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.6f),
+                    Font = CreateUiFont( 8.6f),
                     Cursor = Cursors.Hand
                 };
                 btnImportModuleFile.FlatAppearance.BorderColor = this.ColBorder;
@@ -8550,7 +8450,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextSystem,
-                    Font = new Font("맑은 고딕", 8.6f, FontStyle.Bold),
+                    Font = CreateUiFont( 8.6f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnToggleModule.FlatAppearance.BorderColor = this.ColAccent;
@@ -8562,7 +8462,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = Color.FromArgb(248, 113, 113),
-                    Font = new Font("맑은 고딕", 8.5f),
+                    Font = CreateUiFont( 8.5f),
                     Cursor = Cursors.Hand
                 };
                 btnDeleteModule.FlatAppearance.BorderColor = Color.FromArgb(239, 68, 68);
@@ -8574,7 +8474,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColBgSidebar,
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 8.5f),
+                    Font = CreateUiFont( 8.5f),
                     Cursor = Cursors.Hand
                 };
                 btnOpenModFolder.FlatAppearance.BorderColor = this.ColBorder;
@@ -8587,7 +8487,7 @@ namespace NyaaChatNative
                     AutoSize = false,
                     AutoEllipsis = true,
                     TextAlign = ContentAlignment.MiddleLeft,
-                    Font = new Font("맑은 고딕", 8.4f),
+                    Font = CreateUiFont( 8.4f),
                     ForeColor = this.ColTextSecondary
                 };
 
@@ -8601,7 +8501,7 @@ namespace NyaaChatNative
                     Location = new Point(16, 234),
                     Size = new Size(584, 226),
                     ForeColor = this.ColTextPrimary,
-                    Font = new Font("맑은 고딕", 9f, FontStyle.Bold)
+                    Font = CreateUiFont( 9f, FontStyle.Bold)
                 };
 
                 TextBox txtModEditor = new TextBox
@@ -8624,7 +8524,7 @@ namespace NyaaChatNative
                     AutoSize = false,
                     AutoEllipsis = true,
                     TextAlign = ContentAlignment.MiddleLeft,
-                    Font = new Font("맑은 고딕", 8.4f),
+                    Font = CreateUiFont( 8.4f),
                     ForeColor = this.ColTextSecondary
                 };
 
@@ -8635,7 +8535,7 @@ namespace NyaaChatNative
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColAccent,
                     ForeColor = Color.White,
-                    Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                    Font = CreateUiFont( 8.8f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnSaveModEditor.FlatAppearance.BorderSize = 0;
@@ -8808,14 +8708,14 @@ namespace NyaaChatNative
 
                         string defaultHost = (this.ActiveSession != null && !string.IsNullOrEmpty(this.ActiveSession.Host)) ? this.ActiveSession.Host : "*";
 
-                        Label lwFile = new Label { Text = Tr("파일 이름 (.txt):", "File Name (.txt):"), Location = new Point(16, 16), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
-                        TextBox twFile = new TextBox { Text = "my_custom_module.txt", Location = new Point(156, 13), Width = 350, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 9f) };
+                        Label lwFile = new Label { Text = Tr("파일 이름 (.txt):", "File Name (.txt):"), Location = new Point(16, 16), AutoSize = true, Font = CreateUiFont( 9f) };
+                        TextBox twFile = new TextBox { Text = "my_custom_module.txt", Location = new Point(156, 13), Width = 350, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary, Font = CreateUiFont( 9f) };
 
-                        Label lwName = new Label { Text = Tr("모듈 표시 이름:", "Module Name:"), Location = new Point(16, 50), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
-                        TextBox twName = new TextBox { Text = Tr("내 서버 전용 확장 도우미", "My Custom Server Helper"), Location = new Point(156, 47), Width = 350, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 9f) };
+                        Label lwName = new Label { Text = Tr("모듈 표시 이름:", "Module Name:"), Location = new Point(16, 50), AutoSize = true, Font = CreateUiFont( 9f) };
+                        TextBox twName = new TextBox { Text = Tr("내 서버 전용 확장 도우미", "My Custom Server Helper"), Location = new Point(156, 47), Width = 350, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary, Font = CreateUiFont( 9f) };
 
-                        Label lwTarget = new Label { Text = Tr("작동 대상 서버:", "Target Server:"), Location = new Point(16, 84), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
-                        TextBox twTarget = new TextBox { Text = defaultHost, Location = new Point(156, 81), Width = 186, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 9f) };
+                        Label lwTarget = new Label { Text = Tr("작동 대상 서버:", "Target Server:"), Location = new Point(16, 84), AutoSize = true, Font = CreateUiFont( 9f) };
+                        TextBox twTarget = new TextBox { Text = defaultHost, Location = new Point(156, 81), Width = 186, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary, Font = CreateUiFont( 9f) };
 
                         Button bwCurSrv = new Button
                         {
@@ -8825,7 +8725,7 @@ namespace NyaaChatNative
                             FlatStyle = FlatStyle.Flat,
                             BackColor = this.ColBgSidebar,
                             ForeColor = this.ColTextPrimary,
-                            Font = new Font("맑은 고딕", 8.2f),
+                            Font = CreateUiFont( 8.2f),
                             Cursor = Cursors.Hand
                         };
                         bwCurSrv.FlatAppearance.BorderColor = this.ColBorder;
@@ -8844,16 +8744,16 @@ namespace NyaaChatNative
                             FlatStyle = FlatStyle.Flat,
                             BackColor = this.ColBgSidebar,
                             ForeColor = this.ColTextSystem,
-                            Font = new Font("맑은 고딕", 8.2f, FontStyle.Bold),
+                            Font = CreateUiFont( 8.2f, FontStyle.Bold),
                             Cursor = Cursors.Hand
                         };
                         bwAllSrv.FlatAppearance.BorderColor = this.ColAccent;
                         bwAllSrv.Click += delegate { twTarget.Text = "*"; };
 
-                        Label lwDesc = new Label { Text = Tr("모듈 간단 설명:", "Description:"), Location = new Point(16, 118), AutoSize = true, Font = new Font("맑은 고딕", 9f) };
-                        TextBox twDesc = new TextBox { Text = Tr("상단 확장 바 버튼 및 전용 슬래시 명령어 모음", "Custom top bar buttons and slash commands"), Location = new Point(156, 115), Width = 350, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary, Font = new Font("맑은 고딕", 9f) };
+                        Label lwDesc = new Label { Text = Tr("모듈 간단 설명:", "Description:"), Location = new Point(16, 118), AutoSize = true, Font = CreateUiFont( 9f) };
+                        TextBox twDesc = new TextBox { Text = Tr("상단 확장 바 버튼 및 전용 슬래시 명령어 모음", "Custom top bar buttons and slash commands"), Location = new Point(156, 115), Width = 350, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary, Font = CreateUiFont( 9f) };
 
-                        Label lwBtns = new Label { Text = Tr("[Buttons] 채팅창 상단 빠른 실행 버튼 (한 줄에 '버튼이름 = 명령어 또는 채팅'):", "[Buttons] Top Bar Quick Buttons ('ButtonLabel = /cmd or chat text' per line):"), Location = new Point(16, 150), AutoSize = true, Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold), ForeColor = this.ColTextSystem };
+                        Label lwBtns = new Label { Text = Tr("[Buttons] 채팅창 상단 빠른 실행 버튼 (한 줄에 '버튼이름 = 명령어 또는 채팅'):", "[Buttons] Top Bar Quick Buttons ('ButtonLabel = /cmd or chat text' per line):"), Location = new Point(16, 150), AutoSize = true, Font = CreateUiFont( 8.8f, FontStyle.Bold), ForeColor = this.ColTextSystem };
                         TextBox twBtns = new TextBox
                         {
                             Multiline = true,
@@ -8866,7 +8766,7 @@ namespace NyaaChatNative
                             Text = "인사하기 = 안녕하세요! 반갑습니다 :)\r\n내정보 = /whois $me\r\n주사위 = !주사위"
                         };
 
-                        Label lwCmds = new Label { Text = Tr("[Commands] 전용 슬래시 명령어 (한 줄에 '/명령어 = SAY|NOTICE|ACTION | 내용'):", "[Commands] Custom Slash Commands ('/cmd = SAY|NOTICE|ACTION | text' per line):"), Location = new Point(16, 248), AutoSize = true, Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold), ForeColor = this.ColTextSystem };
+                        Label lwCmds = new Label { Text = Tr("[Commands] 전용 슬래시 명령어 (한 줄에 '/명령어 = SAY|NOTICE|ACTION | 내용'):", "[Commands] Custom Slash Commands ('/cmd = SAY|NOTICE|ACTION | text' per line):"), Location = new Point(16, 248), AutoSize = true, Font = CreateUiFont( 8.8f, FontStyle.Bold), ForeColor = this.ColTextSystem };
                         TextBox twCmds = new TextBox
                         {
                             Multiline = true,
@@ -8879,7 +8779,7 @@ namespace NyaaChatNative
                             Text = "/환영 = SAY | $1님 어서오세요! 환영합니다~\r\n/메모 = NOTICE | [내 메모] $1-"
                         };
 
-                        Label lwTrigs = new Label { Text = Tr("[Triggers] 채팅 키워드 자동 반응 (한 줄에 '키워드 = NOTICE|REPLY|SOUND | 내용'):", "[Triggers] Keyword Auto-Triggers ('keyword = NOTICE|REPLY|SOUND | value'):"), Location = new Point(16, 346), AutoSize = true, Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold), ForeColor = this.ColTextSystem };
+                        Label lwTrigs = new Label { Text = Tr("[Triggers] 채팅 키워드 자동 반응 (한 줄에 '키워드 = NOTICE|REPLY|SOUND | 내용'):", "[Triggers] Keyword Auto-Triggers ('keyword = NOTICE|REPLY|SOUND | value'):"), Location = new Point(16, 346), AutoSize = true, Font = CreateUiFont( 8.8f, FontStyle.Bold), ForeColor = this.ColTextSystem };
                         TextBox twTrigs = new TextBox
                         {
                             Multiline = true,
@@ -8900,7 +8800,7 @@ namespace NyaaChatNative
                             FlatStyle = FlatStyle.Flat,
                             BackColor = this.ColAccent,
                             ForeColor = Color.White,
-                            Font = new Font("맑은 고딕", 9.2f, FontStyle.Bold),
+                            Font = CreateUiFont( 9.2f, FontStyle.Bold),
                             DialogResult = DialogResult.OK,
                             Cursor = Cursors.Hand
                         };
@@ -8914,7 +8814,7 @@ namespace NyaaChatNative
                             FlatStyle = FlatStyle.Flat,
                             BackColor = this.ColBgSidebar,
                             ForeColor = this.ColTextPrimary,
-                            Font = new Font("맑은 고딕", 9f),
+                            Font = CreateUiFont( 9f),
                             DialogResult = DialogResult.Cancel,
                             Cursor = Cursors.Hand
                         };
@@ -9202,7 +9102,7 @@ namespace NyaaChatNative
                             FlatStyle = FlatStyle.Flat,
                             BackColor = this.ColBgSidebar,
                             ForeColor = this.ColTextPrimary,
-                            Font = new Font("맑은 고딕", 8.2f),
+                            Font = CreateUiFont( 8.2f),
                             Cursor = Cursors.Hand,
                             Margin = new Padding(2, 1, 2, 1)
                         };
@@ -9218,7 +9118,7 @@ namespace NyaaChatNative
                         FlatStyle = FlatStyle.Flat,
                         BackColor = this.ColBgSidebar,
                         ForeColor = this.ColTextSystem,
-                        Font = new Font("맑은 고딕", 8.2f, FontStyle.Bold),
+                        Font = CreateUiFont( 8.2f, FontStyle.Bold),
                         Cursor = Cursors.Hand,
                         Margin = new Padding(4, 1, 2, 1)
                     };
@@ -9281,9 +9181,9 @@ namespace NyaaChatNative
                     lSrvUrl.Text = Tr("기본 접속 서버 주소:", "Default Server URL:");
                     lDefChan.Text = Tr("기본 입장 채널:", "Default Channel:");
                     lExtraSrvs.Text = Tr("동시 접속 서버 목록:", "Extra Auto-Servers:");
-                    lExtraHint.Text = Tr("예: https://server2.org/#게임, https://server3.org/#소드걸스\r\n콤마(,)로 구분하여 입력하면 시작 시 여러 서버에 동시 접속합니다.", "Example: https://server2.org/#games, https://server3.org/#anime\r\nComma-separated list of extra servers to connect on startup.");
+                    lExtraHint.Text = Tr("예: https://server2.org/#게임, https://server3.org/#개발\r\n콤마(,)로 구분하여 입력하면 시작 시 여러 서버에 동시 접속합니다.", "Example: https://server2.org/#games, https://server3.org/#dev\r\nComma-separated list of extra servers to connect on startup.");
 
-                    grpAutoJoin.Text = Tr("IRC 스타일 서버별 채널 자동 입장 (Auto-Join)", "IRC-style Per-Server Channel Auto-Join");
+                    grpAutoJoin.Text = Tr("서버별 채널 자동 입장 (Auto-Join)", "Per-Server Channel Auto-Join");
                     lblAutoJoinTitle.Text = Tr("서버 주소(도메인/URL) = #채널1, #채널2, #채널3 (한 줄에 서버 하나씩 지정):", "Server domain or URL = #chan1, #chan2, #chan3 (One server per line):");
                     lblAutoJoinHint.Text = Tr("* 클라이언트 로컬에만 저장되며, 해당 서버에 접속할 때 등록된 채널들에 자동 입장(Join)합니다.", "* Stored client-side only. Automatically joins channels when connecting to the server.");
 
@@ -9998,10 +9898,15 @@ namespace NyaaChatNative
     // [서버 리스트 (F2)] Explorer Dialog:
     // 1. Upper List: Known Whitelisted Servers (A서버, B서버, C서버...)
     // 2. Double-Click C서버 -> Populates C서버's Public Channels in Lower List!
-    // 3. Double-Click #소드걸스 -> Opens a Simultaneous Connection to C서버 #소드걸스!
+    // 3. Double-Click #게임채널 -> Opens a Simultaneous Connection to C서버 #게임채널!
     // ========================================================================
     public class ServerListForm : Form
     {
+        private static Font CreateUiFont(float size, FontStyle style = FontStyle.Regular)
+        {
+            return MainForm.CreateUiFont(size, style);
+        }
+
         private readonly MainForm mainForm;
         private ListView lvServers;
         private ListView lvChannels;
@@ -10030,7 +9935,7 @@ namespace NyaaChatNative
                     "        2. Double-click any channel below to connect simultaneously without leaving your current server."),
                 Location = new Point(14, 10),
                 Size = new Size(620, 36),
-                Font = new Font("맑은 고딕", 9f, FontStyle.Bold),
+                Font = CreateUiFont( 9f, FontStyle.Bold),
                 ForeColor = owner.ColTextSystem
             };
 
@@ -10042,7 +9947,7 @@ namespace NyaaChatNative
                 FlatStyle = FlatStyle.Flat,
                 BackColor = owner.ColAccent,
                 ForeColor = Color.White,
-                Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                Font = CreateUiFont( 8.8f, FontStyle.Bold),
                 Cursor = Cursors.Hand
             };
             btnRefresh.Click += delegate
@@ -10062,7 +9967,7 @@ namespace NyaaChatNative
                 GridLines = true,
                 BackColor = owner.ColBgSidebar,
                 ForeColor = owner.ColTextPrimary,
-                Font = new Font("맑은 고딕", 9.5f)
+                Font = CreateUiFont( 9.5f)
             };
             this.lvServers.Columns.Add(owner.Tr("서버 이름", "Server Name"), 160);
             this.lvServers.Columns.Add(owner.Tr("서버 주소 (Host)", "Server Host"), 190);
@@ -10095,7 +10000,7 @@ namespace NyaaChatNative
                     "Public channels on the selected server (double-click any channel to connect simultaneously):"),
                 Location = new Point(14, 246),
                 AutoSize = true,
-                Font = new Font("맑은 고딕", 9.5f, FontStyle.Bold),
+                Font = CreateUiFont( 9.5f, FontStyle.Bold),
                 ForeColor = owner.ColTextPrimary
             };
 
@@ -10108,7 +10013,7 @@ namespace NyaaChatNative
                 GridLines = true,
                 BackColor = owner.ColBgChat,
                 ForeColor = owner.ColTextPrimary,
-                Font = new Font("맑은 고딕", 9.5f)
+                Font = CreateUiFont( 9.5f)
             };
             this.lvChannels.Columns.Add(owner.Tr("채널명", "Channel"), 170);
             this.lvChannels.Columns.Add(owner.Tr("참여자 수", "Users"), 80);
@@ -10146,7 +10051,7 @@ namespace NyaaChatNative
             };
             this.txtDirectChan = new TextBox
             {
-                Text = "#소드걸스",
+                Text = "#자유대화",
                 Location = new Point(418, 9),
                 Width = 130,
                 BackColor = owner.ColBgInput,
@@ -10160,7 +10065,7 @@ namespace NyaaChatNative
                 FlatStyle = FlatStyle.Flat,
                 BackColor = owner.ColAccent,
                 ForeColor = Color.White,
-                Font = new Font("맑은 고딕", 8.8f, FontStyle.Bold),
+                Font = CreateUiFont( 8.8f, FontStyle.Bold),
                 Cursor = Cursors.Hand
             };
             btnDirectGo.Click += delegate
