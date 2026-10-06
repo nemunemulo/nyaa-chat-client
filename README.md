@@ -2,7 +2,7 @@
 
 Windows 데스크톱용 실시간 채팅 클라이언트입니다. .NET Framework 4.8 기반으로 별도의 외부 DLL 없이 단일 실행 파일로 작동하며, 다중 서버 동시 접속을 지원합니다.
 
-- 🌐 **백엔드 채팅 서버 (Node.js)**: [nyaa-chat 서버 저장소 바로가기](https://github.com/nemunemulo/nyaa-chat)
+- 🌐 **백엔드 채팅 서버 (Node.js)**: [nyaa-chat-server 저장소 바로가기](https://github.com/nemunemulo/nyaa-chat-server)
 
 ---
 
