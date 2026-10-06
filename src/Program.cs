@@ -7698,10 +7698,28 @@ namespace NyaaChatNative
                     SetIniValue("User", "UserId", this.GlobalUserId, true);
                 };
 
+                string defServerUrl = NormalizeUrl(GetIni("Server", "Url", "https://nemulo.duckdns.org"));
+                string activeServerKey = (this.ActiveSession != null) ? this.ActiveSession.GetServerKey() : "";
+                bool isActiveDefServer = (this.ActiveSession == null || string.Equals(this.ActiveSession.ServerUrl, defServerUrl, StringComparison.OrdinalIgnoreCase));
+
+                string activeSessionPass = "";
+                if (this.ActiveSession != null)
+                {
+                    activeSessionPass = this.ActiveSession.NickPassword ?? "";
+                    if (string.IsNullOrEmpty(activeSessionPass) && !string.IsNullOrEmpty(activeServerKey))
+                    {
+                        activeSessionPass = GetIni("ServerPasswords", activeServerKey, "");
+                    }
+                }
+                if (string.IsNullOrEmpty(activeSessionPass) && isActiveDefServer)
+                {
+                    activeSessionPass = !string.IsNullOrEmpty(this.GlobalNickPassword) ? this.GlobalNickPassword : GetIni("User", "NickPassword", "");
+                }
+
                 Label lNickPass = new Label { Location = new Point(16, 106), AutoSize = true, Font = CreateUiFont( 9f) };
                 TextBox txtNickPass = new TextBox
                 {
-                    Text = !string.IsNullOrEmpty(this.GlobalNickPassword) ? this.GlobalNickPassword : GetIni("User", "NickPassword", ""),
+                    Text = activeSessionPass,
                     PasswordChar = '*',
                     Location = new Point(172, 102),
                     Width = 220,
@@ -7714,7 +7732,10 @@ namespace NyaaChatNative
                     Location = new Point(402, 104),
                     Size = new Size(164, 20),
                     Font = CreateUiFont( 8.2f),
-                    ForeColor = this.ColTextSecondary
+                    ForeColor = this.ColTextSecondary,
+                    Text = isActiveDefServer
+                        ? Tr("(기본 서버 자동 인증)", "(Default server auto-auth)")
+                        : string.Format("({0} 전용)", (this.ActiveSession != null ? this.ActiveSession.Host : "선택 서버"))
                 };
 
                 grpProfileAdv.Controls.AddRange(new Control[] {
@@ -9398,16 +9419,23 @@ namespace NyaaChatNative
                     }
                     SetIniValue("User", "QuitMessage", txtQuitMsg.Text.Trim(), false);
                     SetIniValue("User", "UserId", this.GlobalUserId, false);
-                    this.GlobalNickPassword = txtNickPass.Text.Trim();
-                    SetIniValue("User", "NickPassword", this.GlobalNickPassword, false);
+                    string enteredNickPass = txtNickPass.Text.Trim();
+                    string defServerUrlForSave = NormalizeUrl(GetIni("Server", "Url", "https://nemulo.duckdns.org"));
+                    bool isSaveDefServer = (this.ActiveSession == null || string.Equals(this.ActiveSession.ServerUrl, defServerUrlForSave, StringComparison.OrdinalIgnoreCase));
+
                     if (this.ActiveSession != null)
                     {
-                        this.ActiveSession.NickPassword = this.GlobalNickPassword;
+                        this.ActiveSession.NickPassword = enteredNickPass;
                         string sKey = this.ActiveSession.GetServerKey();
                         if (!string.IsNullOrEmpty(sKey))
                         {
-                            SetIniValue("ServerPasswords", sKey, this.GlobalNickPassword, false);
+                            SetIniValue("ServerPasswords", sKey, enteredNickPass, false);
                         }
+                    }
+                    if (isSaveDefServer)
+                    {
+                        this.GlobalNickPassword = enteredNickPass;
+                        SetIniValue("User", "NickPassword", this.GlobalNickPassword, false);
                     }
 
                     // 3. Server Connection
