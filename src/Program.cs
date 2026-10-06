@@ -974,7 +974,27 @@ namespace NyaaChatNative
                 SetIniValue("User", "UserId", this.GlobalUserId, true);
             }
             this.GlobalNickname = GetIni("User", "DefaultNickname", "");
-            this.GlobalNickPassword = GetIni("User", "NickPassword", "");
+
+            // One-time security migration: migrate legacy [User] NickPassword into [ServerPasswords] for default server
+            string legacyGlobalPass = GetIni("User", "NickPassword", "");
+            if (!string.IsNullOrEmpty(legacyGlobalPass))
+            {
+                try
+                {
+                    string defaultServer = NormalizeUrl(GetIni("Server", "Url", "https://nemulo.duckdns.org"));
+                    Uri defUri = new Uri(defaultServer);
+                    string defPort = (defUri.Port > 0 && defUri.Port != 80 && defUri.Port != 443) ? ":" + defUri.Port : "";
+                    string defKey = (defUri.Host + defPort).ToLowerInvariant();
+                    string existingPass = GetIni("ServerPasswords", defKey, "");
+                    if (string.IsNullOrEmpty(existingPass))
+                    {
+                        SetIniValue("ServerPasswords", defKey, legacyGlobalPass, false);
+                    }
+                    SetIniValue("User", "NickPassword", "", true);
+                }
+                catch { }
+            }
+            this.GlobalNickPassword = "";
             this.EnableNickColoring = GetIni("Theme", "NickColoring", "true").ToLower() != "false";
             LoadIgnoredUsersFromIni();
             LoadHighlightKeywordsFromIni();
@@ -2942,11 +2962,6 @@ namespace NyaaChatNative
             if (string.IsNullOrEmpty(serverPass) && !string.IsNullOrEmpty(session.Host))
             {
                 serverPass = GetIni("ServerPasswords", session.Host.ToLowerInvariant(), "");
-            }
-            string defaultServer = NormalizeUrl(GetIni("Server", "Url", "https://nemulo.duckdns.org"));
-            if (string.IsNullOrEmpty(serverPass) && string.Equals(normUrl, defaultServer, StringComparison.OrdinalIgnoreCase))
-            {
-                serverPass = this.GlobalNickPassword;
             }
             session.NickPassword = serverPass ?? "";
             this.Sessions[normUrl] = session;
@@ -5562,12 +5577,6 @@ namespace NyaaChatNative
                             SetIniValue("ServerPasswords", sKey, pass, false);
                         }
                     }
-                    string defaultServer = NormalizeUrl(GetIni("Server", "Url", "https://nemulo.duckdns.org"));
-                    if (this.ActiveSession != null && string.Equals(this.ActiveSession.ServerUrl, defaultServer, StringComparison.OrdinalIgnoreCase))
-                    {
-                        this.GlobalNickPassword = pass;
-                        SetIniValue("User", "NickPassword", pass, false);
-                    }
                 }
                 else if (cmd == "unregister")
                 {
@@ -5579,12 +5588,6 @@ namespace NyaaChatNative
                         {
                             SetIniValue("ServerPasswords", sKey, "", false);
                         }
-                    }
-                    string defaultServer = NormalizeUrl(GetIni("Server", "Url", "https://nemulo.duckdns.org"));
-                    if (this.ActiveSession != null && string.Equals(this.ActiveSession.ServerUrl, defaultServer, StringComparison.OrdinalIgnoreCase))
-                    {
-                        this.GlobalNickPassword = "";
-                        SetIniValue("User", "NickPassword", "", false);
                     }
                 }
                 SendChatMessageOnActiveSession(trimmed);
@@ -7699,21 +7702,32 @@ namespace NyaaChatNative
                 };
 
                 string defServerUrl = NormalizeUrl(GetIni("Server", "Url", "https://nemulo.duckdns.org"));
-                string activeServerKey = (this.ActiveSession != null) ? this.ActiveSession.GetServerKey() : "";
+                string activeServerKey = "";
+                if (this.ActiveSession != null)
+                {
+                    activeServerKey = this.ActiveSession.GetServerKey();
+                }
+                else
+                {
+                    try
+                    {
+                        Uri defUri = new Uri(defServerUrl);
+                        string defPort = (defUri.Port > 0 && defUri.Port != 80 && defUri.Port != 443) ? ":" + defUri.Port : "";
+                        activeServerKey = (defUri.Host + defPort).ToLowerInvariant();
+                    }
+                    catch { }
+                }
+
                 bool isActiveDefServer = (this.ActiveSession == null || string.Equals(this.ActiveSession.ServerUrl, defServerUrl, StringComparison.OrdinalIgnoreCase));
 
                 string activeSessionPass = "";
                 if (this.ActiveSession != null)
                 {
                     activeSessionPass = this.ActiveSession.NickPassword ?? "";
-                    if (string.IsNullOrEmpty(activeSessionPass) && !string.IsNullOrEmpty(activeServerKey))
-                    {
-                        activeSessionPass = GetIni("ServerPasswords", activeServerKey, "");
-                    }
                 }
-                if (string.IsNullOrEmpty(activeSessionPass) && isActiveDefServer)
+                if (string.IsNullOrEmpty(activeSessionPass) && !string.IsNullOrEmpty(activeServerKey))
                 {
-                    activeSessionPass = !string.IsNullOrEmpty(this.GlobalNickPassword) ? this.GlobalNickPassword : GetIni("User", "NickPassword", "");
+                    activeSessionPass = GetIni("ServerPasswords", activeServerKey, "");
                 }
 
                 Label lNickPass = new Label { Location = new Point(16, 106), AutoSize = true, Font = CreateUiFont( 9f) };
@@ -9420,7 +9434,7 @@ namespace NyaaChatNative
                     SetIniValue("User", "QuitMessage", txtQuitMsg.Text.Trim(), false);
                     SetIniValue("User", "UserId", this.GlobalUserId, false);
                     string enteredNickPass = txtNickPass.Text.Trim();
-                    string defServerUrlForSave = NormalizeUrl(GetIni("Server", "Url", "https://nemulo.duckdns.org"));
+                    string defServerUrlForSave = !string.IsNullOrEmpty(txtSrvUrl.Text.Trim()) ? NormalizeUrl(txtSrvUrl.Text.Trim()) : NormalizeUrl(GetIni("Server", "Url", "https://nemulo.duckdns.org"));
                     bool isSaveDefServer = (this.ActiveSession == null || string.Equals(this.ActiveSession.ServerUrl, defServerUrlForSave, StringComparison.OrdinalIgnoreCase));
 
                     if (this.ActiveSession != null)
@@ -9434,8 +9448,14 @@ namespace NyaaChatNative
                     }
                     if (isSaveDefServer)
                     {
-                        this.GlobalNickPassword = enteredNickPass;
-                        SetIniValue("User", "NickPassword", this.GlobalNickPassword, false);
+                        try
+                        {
+                            Uri defUri = new Uri(defServerUrlForSave);
+                            string defPort = (defUri.Port > 0 && defUri.Port != 80 && defUri.Port != 443) ? ":" + defUri.Port : "";
+                            string defKey = (defUri.Host + defPort).ToLowerInvariant();
+                            SetIniValue("ServerPasswords", defKey, enteredNickPass, false);
+                        }
+                        catch { }
                     }
 
                     // 3. Server Connection
