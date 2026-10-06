@@ -3051,6 +3051,7 @@ namespace NyaaChatNative
                 if (data.ContainsKey("user") && data["user"] is Dictionary<string, object>)
                 {
                     Dictionary<string, object> u = (Dictionary<string, object>)data["user"];
+                    if (u.ContainsKey("userId")) session.MyUserId = Convert.ToString(u["userId"]);
                     if (u.ContainsKey("nickname")) session.MyNickname = Convert.ToString(u["nickname"]);
                     if (u.ContainsKey("isServerOper")) session.IsMeServerOper = Convert.ToBoolean(u["isServerOper"]);
                     if (u.ContainsKey("currentRoom") && !string.IsNullOrEmpty(Convert.ToString(u["currentRoom"])))
