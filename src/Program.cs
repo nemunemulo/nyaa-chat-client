@@ -2701,8 +2701,135 @@ namespace NyaaChatNative
             this.channelHeaderBar.Resize += delegate { LayoutChannelHeaderButtons(); };
             LayoutChannelHeaderButtons();
 
+            // First run check: prompt language selection if not yet configured
+            CheckAndPromptFirstRunLanguage();
+
             // Prompt login if no nickname set or show quick login dialog
             ShowInitialLoginDialog();
+        }
+
+        private void CheckAndPromptFirstRunLanguage()
+        {
+            string configured = GetIni("General", "LanguageConfigured", "").Trim().ToLowerInvariant();
+            if (configured == "true") return;
+
+            // If user already has a saved nickname, treat language as previously configured
+            string savedNick = GetIni("User", "DefaultNickname", "").Trim();
+            if (!string.IsNullOrEmpty(savedNick))
+            {
+                SetIniValue("General", "LanguageConfigured", "true", true);
+                return;
+            }
+
+            ShowFirstRunLanguageDialog();
+        }
+
+        private void ShowFirstRunLanguageDialog()
+        {
+            using (Form dlg = new Form())
+            {
+                dlg.Text = "Language / 언어 선택";
+                dlg.Size = new Size(380, 215);
+                dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dlg.StartPosition = FormStartPosition.CenterScreen;
+                dlg.MaximizeBox = false;
+                dlg.MinimizeBox = false;
+                dlg.BackColor = this.ColBgWindow;
+                dlg.ForeColor = this.ColTextPrimary;
+                dlg.Icon = this.Icon;
+                ApplyWindowTitleBarTheme(dlg);
+
+                Label lblTitle = new Label
+                {
+                    Text = "Nyaa Chat",
+                    Location = new Point(24, 18),
+                    AutoSize = true,
+                    Font = CreateUiFont(13f, FontStyle.Bold),
+                    ForeColor = this.ColAccent
+                };
+
+                Label lblSub = new Label
+                {
+                    Text = "Select Language / 사용할 언어를 선택하세요",
+                    Location = new Point(24, 46),
+                    AutoSize = true,
+                    Font = CreateUiFont(9f),
+                    ForeColor = this.ColTextSecondary
+                };
+
+                Label lblLang = new Label
+                {
+                    Text = "Language",
+                    Location = new Point(24, 80),
+                    AutoSize = true,
+                    Font = CreateUiFont(10f, FontStyle.Bold),
+                    ForeColor = this.ColTextPrimary
+                };
+
+                ComboBox cbLang = new ComboBox
+                {
+                    DropDownStyle = ComboBoxStyle.DropDownList,
+                    Location = new Point(106, 76),
+                    Width = 234,
+                    Font = CreateUiFont(10f),
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary
+                };
+                cbLang.Items.Add("한국어 (Korean)");
+                cbLang.Items.Add("English (영어)");
+
+                bool isSystemKo = false;
+                try
+                {
+                    isSystemKo = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName.Equals("ko", StringComparison.OrdinalIgnoreCase);
+                }
+                catch { }
+
+                cbLang.SelectedIndex = isSystemKo ? 0 : 1;
+
+                Button btnOk = new Button
+                {
+                    Text = (cbLang.SelectedIndex == 1) ? "OK" : "확인 (OK)",
+                    Location = new Point(24, 122),
+                    Size = new Size(316, 36),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = this.ColAccent,
+                    ForeColor = Color.White,
+                    Font = CreateUiFont(10f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnOk.FlatAppearance.BorderSize = 0;
+
+                cbLang.SelectedIndexChanged += delegate
+                {
+                    bool isEn = cbLang.SelectedIndex == 1;
+                    lblSub.Text = isEn ? "Please select your display language." : "사용할 언어를 선택해 주세요.";
+                    btnOk.Text = isEn ? "OK" : "확인 (OK)";
+                };
+
+                btnOk.Click += delegate
+                {
+                    string chosen = (cbLang.SelectedIndex == 1) ? "en" : "ko";
+                    SetLanguage(chosen, true);
+                    SetIniValue("General", "LanguageConfigured", "true", true);
+                    dlg.DialogResult = DialogResult.OK;
+                    dlg.Close();
+                };
+
+                dlg.FormClosing += delegate(object sender, FormClosingEventArgs e)
+                {
+                    if (dlg.DialogResult != DialogResult.OK)
+                    {
+                        string chosen = (cbLang.SelectedIndex == 1) ? "en" : "ko";
+                        SetLanguage(chosen, true);
+                        SetIniValue("General", "LanguageConfigured", "true", true);
+                    }
+                };
+
+                dlg.AcceptButton = btnOk;
+                dlg.Controls.AddRange(new Control[] { lblTitle, lblSub, lblLang, cbLang, btnOk });
+                dlg.ShowDialog(this);
+            }
         }
 
         private void ShowInitialLoginDialog()
@@ -2750,7 +2877,7 @@ namespace NyaaChatNative
             using (Form dlg = new Form())
             {
                 dlg.Text = Tr("Nyaa Chat - 접속 설정", "Nyaa Chat - Connection Setup");
-                dlg.Size = new Size(440, 305);
+                dlg.Size = new Size(450, 315);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.StartPosition = FormStartPosition.CenterParent;
                 dlg.MaximizeBox = false;
@@ -2761,21 +2888,43 @@ namespace NyaaChatNative
 
                 Label lblWelcome = new Label
                 {
-                    Text = Tr("Nyaa Chat 멀티서버 클라이언트 접속 설정", "Nyaa Chat Multi-Server Connection Setup"),
+                    Text = Tr("Nyaa Chat 접속 설정", "Nyaa Chat Connection Setup"),
                     Location = new Point(20, 18),
                     AutoSize = true,
-                    Font = CreateUiFont( 10f, FontStyle.Bold),
+                    Font = CreateUiFont(10f, FontStyle.Bold),
                     ForeColor = this.ColTextPrimary
                 };
+
+                Label lblLangSetup = new Label
+                {
+                    Text = "Language",
+                    Location = new Point(245, 18),
+                    AutoSize = true,
+                    Font = CreateUiFont(9.5f, FontStyle.Bold),
+                    ForeColor = this.ColTextSecondary
+                };
+
+                ComboBox cbLangSetup = new ComboBox
+                {
+                    DropDownStyle = ComboBoxStyle.DropDownList,
+                    Location = new Point(315, 15),
+                    Width = 100,
+                    Font = CreateUiFont(9f),
+                    BackColor = this.ColBgInput,
+                    ForeColor = this.ColTextPrimary
+                };
+                cbLangSetup.Items.Add("한국어");
+                cbLangSetup.Items.Add("English");
+                cbLangSetup.SelectedIndex = this.IsEnglish ? 1 : 0;
 
                 Label lblNick = new Label { Text = Tr("사용할 닉네임 (최대 16자):", "Nickname (max 16 chars):"), Location = new Point(20, 54), AutoSize = true };
                 TextBox txtNick = new TextBox
                 {
                     Text = savedNick,
                     Location = new Point(20, 76),
-                    Width = 380,
+                    Width = 395,
                     MaxLength = 16,
-                    Font = CreateUiFont( 10f),
+                    Font = CreateUiFont(10f),
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary
                 };
@@ -2785,19 +2934,19 @@ namespace NyaaChatNative
                 {
                     Text = defaultServer,
                     Location = new Point(20, 136),
-                    Width = 250,
-                    Font = CreateUiFont( 9.5f),
+                    Width = 265,
+                    Font = CreateUiFont(9.5f),
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary
                 };
 
-                Label lblCh = new Label { Text = Tr("시작 채널:", "Initial Channel:"), Location = new Point(280, 114), AutoSize = true };
+                Label lblCh = new Label { Text = Tr("시작 채널:", "Initial Channel:"), Location = new Point(295, 114), AutoSize = true };
                 TextBox txtCh = new TextBox
                 {
                     Text = defaultChan,
-                    Location = new Point(280, 136),
+                    Location = new Point(295, 136),
                     Width = 120,
-                    Font = CreateUiFont( 9.5f),
+                    Font = CreateUiFont(9.5f),
                     BackColor = this.ColBgInput,
                     ForeColor = this.ColTextPrimary
                 };
@@ -2815,14 +2964,27 @@ namespace NyaaChatNative
                 {
                     Text = Tr("채팅방 입장하기", "Connect & Join"),
                     Location = new Point(20, 216),
-                    Size = new Size(380, 38),
+                    Size = new Size(395, 38),
                     FlatStyle = FlatStyle.Flat,
                     BackColor = this.ColAccent,
                     ForeColor = Color.White,
-                    Font = CreateUiFont( 10f, FontStyle.Bold),
+                    Font = CreateUiFont(10f, FontStyle.Bold),
                     Cursor = Cursors.Hand
                 };
                 btnStart.FlatAppearance.BorderSize = 0;
+
+                cbLangSetup.SelectedIndexChanged += delegate
+                {
+                    string chosen = (cbLangSetup.SelectedIndex == 1) ? "en" : "ko";
+                    SetLanguage(chosen, true);
+                    dlg.Text = Tr("Nyaa Chat - 접속 설정", "Nyaa Chat - Connection Setup");
+                    lblWelcome.Text = Tr("Nyaa Chat 접속 설정", "Nyaa Chat Connection Setup");
+                    lblNick.Text = Tr("사용할 닉네임 (최대 16자):", "Nickname (max 16 chars):");
+                    lblSrv.Text = Tr("기본 접속 서버 주소:", "Default Server URL:");
+                    lblCh.Text = Tr("시작 채널:", "Initial Channel:");
+                    chkAuto.Text = Tr("다음 실행 시 이 설정으로 바로 입장 (AutoConnect)", "Auto-connect with these settings on startup");
+                    btnStart.Text = Tr("채팅방 입장하기", "Connect & Join");
+                };
 
                 btnStart.Click += delegate
                 {
@@ -2845,7 +3007,7 @@ namespace NyaaChatNative
                 };
 
                 dlg.AcceptButton = btnStart;
-                dlg.Controls.AddRange(new Control[] { lblWelcome, lblNick, txtNick, lblSrv, txtSrv, lblCh, txtCh, chkAuto, btnStart });
+                dlg.Controls.AddRange(new Control[] { lblWelcome, lblLangSetup, cbLangSetup, lblNick, txtNick, lblSrv, txtSrv, lblCh, txtCh, chkAuto, btnStart });
 
                 if (dlg.ShowDialog(this) == DialogResult.OK)
                 {
