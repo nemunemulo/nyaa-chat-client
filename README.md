@@ -2,9 +2,10 @@
 
 # 🐾 NyaaChat Client
 
-Windows 데스크톱용 실시간 채팅 클라이언트입니다. .NET Framework 4.8 기반으로 별도의 외부 DLL 없이 단일 실행 파일로 작동하며, 다중 서버 동시 접속을 지원합니다.
+Windows 데스크톱용 실시간 채팅 클라이언트입니다. .NET Framework 4.8 기반으로 별도의 외부 DLL 없이 단일 실행 파일로 작동하며, NyaaChat WebSocket 서버뿐만 아니라 표준 IRC(RFC 1459/2812) 네트워크와의 다중 서버 동시 접속을 지원합니다.
 
 - 🌐 **백엔드 채팅 서버 (Node.js)**: [nyaa-chat-server 저장소 바로가기](https://github.com/nemunemulo/nyaa-chat-server)
+- 📡 **표준 IRC 네트워크 호환**: Libera.Chat, Rizon, OFTC 등 표준 IRC 서버 동시 접속 지원 (`ircs://서버:6697`)
 
 ---
 
@@ -23,8 +24,10 @@ AI에게 코드를 전달하고 원하는 UI 디자인, 맞춤형 알림, 자동
 
 ```text
 client/
-├── NyaaChat.exe             # 클라이언트 실행 파일 (.NET Framework 4.8)
+├── NyaaChat.exe             # 클라이언트 실행 파일 (.NET Framework 4.8 단일 바이너리)
 ├── build.bat                # Windows 내장 csc.exe 컴파일 배치 스크립트
+├── src/
+│   └── Program.cs           # C# 클라이언트 전체 소스코드 (단일 파일 완결형)
 ├── settings.example.ini     # 설정 예시 파일 (실행 시 settings.ini 자동 생성)
 ├── aliases.txt              # 슬래시 명령어 단축키 (/j, /w 등)
 ├── scripts/
@@ -87,14 +90,18 @@ Avatar=🐾
 ## 🌐 주요 기능 및 단축키
 
 - **단축키**:
-  - `F2`: 화이트리스트 서버 및 공개 채널 목록 창
-  - `F10`: 환경설정 창 (서버, 닉네임, 테마, 효과음, 패널 너비 등)
+  - `F2`: 서버 디렉토리 및 공개 채널 목록 창 (빠른 프리셋 원클릭 지원)
+  - `F3`: 듀얼 스플릿 뷰 토글 (좌우 2분할 화면으로 2개 서버/채널 동시 대화)
+  - `F10`: 환경설정 창 (언어, 서버, 닉네임, 테마, 효과음, 패널 너비 등)
   - `F9` 또는 `/modules`: 서버별 확장 모듈 관리자
   - `Alt + R`: 사용자 정의 스크립트 편집기
   - `Alt + Q`: 창 즉시 숨기기 / 복원 (보스 키)
-- **다중 서버 접속**:
-  - 좌측 트리에 접속한 서버들이 표시되며, 클릭하여 서버 간을 전환할 수 있습니다.
-  - `/server <주소> [#채널]` 명령어로 새로운 서버에 동시 접속할 수 있습니다.
+  - `Ctrl + L`: 대화창 버퍼 비우기
+- **다중 서버 동시 접속 (Nyaa Native & 표준 IRC)**:
+  - 좌측 트리에 접속한 서버들이 계층형으로 표시되며, 원클릭으로 서버/채널 간을 즉시 전환할 수 있습니다.
+  - `/server <주소> [#채널]` 명령어로 Nyaa 서버 및 표준 IRC 서버에 동시 접속할 수 있습니다:
+    - Nyaa 서버: `/server https://nemulo.duckdns.org #자유대화`
+    - IRC SSL 서버: `/server ircs://irc.libera.chat:6697 #nyaa` 또는 `/server ircs://irc.rizon.net:6697 #chat`
 
 ---
 
@@ -102,18 +109,22 @@ Avatar=🐾
 
 | 명령어 | 설명 | 예시 |
 | :--- | :--- | :--- |
-| `/help` | 명령어 도움말 확인 | `/help` |
+| `/help` (또는 `F1`) | 명령어 도움말 확인 | `/help` |
 | `/nick <새닉네임>` | 닉네임 변경 | `/nick 냥이` |
 | `/join <채널명> [암호]` | 채널 입장 (신설 또는 입장) | `/join #자유대화` |
 | `/part` (또는 `/leave`) | 현재 채널에서 퇴장 | `/part` |
+| `/split [#채널]` (또는 `F3`) | 좌우 2분할 듀얼 뷰 열기/닫기 | `/split #게임채널` 또는 `/split off` |
 | `/list` | 채널 목록 창 열기 | `/list` |
 | `/servers` (또는 `F2`) | 서버 목록 창 열기 | `/servers` |
-| `/server <주소> [#채널]` | 다른 서버 동시 접속 창 열기 | `/server https://c.org #게임채널` |
+| `/server <주소> [#채널]` | 다른 서버 동시 접속 창 열기 | `/server ircs://irc.libera.chat:6697 #nyaa` |
 | `/whois <닉네임>` | 사용자 정보 확인 | `/whois 철수` |
-| `/msg <닉네임> <내용>` | 1:1 귓속말 전송 | `/msg 영희 안녕!` |
+| `/msg <닉네임> <내용>` | 1:1 귓속말 전송 (쿼리 탭 자동 생성) | `/msg 영희 안녕!` |
 | `/me <행동>` | 3인칭 행동 묘사 메시지 | `/me 기지개를 켠다` |
+| `/raw <명령>` (또는 `/quote`) | 서버 프로토콜 원시 명령 직접 전송 | `/raw TIME` |
+| `/export` (또는 `/log`) | 현재 채널 대화 내용 텍스트 파일 저장 | `/export` |
 | `/ping` | 서버 지연시간(RTT) 확인 | `/ping` |
 | `/clear` | 대화창 비우기 | `/clear` |
+| `/powershell` (또는 `/terminal`) | 내장 파워쉘 터미널 전환 | `/terminal` |
 
 ---
 

@@ -16,6 +16,10 @@ using System.Drawing.Text;
 using System.IO;
 using System.Media;
 using System.Net;
+using System.Net.Sockets;
+using System.Net.Security;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -141,24 +145,131 @@ namespace NyaaChatNative
         public bool HasAnnouncedExtensions = false;
         public bool HasAutoJoined = false;
 
+        public bool IsIrcSession = false;
         private ClientWebSocket ws;
+        private TcpClient ircTcp;
+        private Stream ircStream;
+        private StreamReader ircReader;
+        private StreamWriter ircWriter;
+        private readonly object ircSendLock = new object();
         private CancellationTokenSource cts;
         private readonly SemaphoreSlim sendLock = new SemaphoreSlim(1, 1);
         private readonly JavaScriptSerializer json;
         private readonly MainForm form;
+
+        public static bool HasNonAscii(string str)
+        {
+            if (string.IsNullOrEmpty(str)) return false;
+            for (int i = 0; i < str.Length; i++)
+            {
+                if (str[i] > 127) return true;
+            }
+            return false;
+        }
+
+        public static string MakeIrcSafeNickname(string nick)
+        {
+            if (string.IsNullOrEmpty(nick))
+            {
+                return "Nyaa_" + new Random().Next(100, 999);
+            }
+
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < nick.Length; i++)
+            {
+                char c = nick[i];
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') ||
+                    c == '[' || c == ']' || c == '\\' || c == '^' ||
+                    c == '{' || c == '|' || c == '}' || c == '-' || c == '_')
+                {
+                    sb.Append(c);
+                }
+            }
+
+            string clean = sb.ToString();
+            while (clean.Length > 0 && ((clean[0] >= '0' && clean[0] <= '9') || clean[0] == '-'))
+            {
+                clean = clean.Substring(1);
+            }
+
+            if (clean.Length >= 2)
+            {
+                if (clean.Length > 15) clean = clean.Substring(0, 15);
+                return clean;
+            }
+
+            int randSuffix = new Random().Next(100, 999);
+            return "Nyaa_" + randSuffix;
+        }
+
+        public static string MakeIrcSafeIdent(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return "nyaa";
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < id.Length; i++)
+            {
+                char c = id[i];
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+                {
+                    sb.Append(char.ToLowerInvariant(c));
+                }
+            }
+            string clean = sb.ToString();
+            if (clean.Length == 0) return "nyaa";
+            if (clean.Length > 9) clean = clean.Substring(0, 9);
+            return clean;
+        }
 
         public NyaaServerSession(MainForm ownerForm, string url, string nickname, string userId, string targetChannel, string channelKey)
         {
             this.form = ownerForm;
             this.ServerUrl = MainForm.NormalizeUrl(url);
             this.Host = MainForm.ExtractHost(this.ServerUrl);
-            this.ServerName = this.Host;
-            this.MyNickname = nickname;
+            this.IsIrcSession = this.ServerUrl.StartsWith("irc://", StringComparison.OrdinalIgnoreCase) || this.ServerUrl.StartsWith("ircs://", StringComparison.OrdinalIgnoreCase);
+            if (this.IsIrcSession)
+            {
+                this.Protocol = "irc-rfc2812";
+                this.ServerName = this.Host + " [IRC]";
+                this.MyNickname = MakeIrcSafeNickname(nickname);
+                string ch = targetChannel;
+                if (string.IsNullOrEmpty(ch) || ch == "#자유대화" || HasNonAscii(ch))
+                {
+                    ch = "#nyaa";
+                }
+                else if (!ch.StartsWith("#") && !ch.StartsWith("&"))
+                {
+                    ch = "#" + ch;
+                }
+                this.InitialTargetChannel = ch;
+            }
+            else
+            {
+                this.ServerName = this.Host;
+                this.MyNickname = nickname;
+                this.InitialTargetChannel = string.IsNullOrEmpty(targetChannel) ? "#자유대화" : targetChannel;
+            }
             this.MyUserId = userId;
-            this.InitialTargetChannel = string.IsNullOrEmpty(targetChannel) ? "#자유대화" : targetChannel;
             this.InitialChannelKey = channelKey ?? "";
             this.json = new JavaScriptSerializer();
             this.json.MaxJsonLength = 10 * 1024 * 1024;
+        }
+
+        public string GetDefaultSessionRoom()
+        {
+            if (this.Channels.Count > 0)
+            {
+                foreach (string ch in this.Channels.Keys)
+                {
+                    if (ch.StartsWith("#") || ch.StartsWith("&")) return ch;
+                }
+                return new List<string>(this.Channels.Keys)[0];
+            }
+            if (!string.IsNullOrEmpty(this.InitialTargetChannel))
+            {
+                return this.InitialTargetChannel;
+            }
+            return this.IsIrcSession ? "#nyaa" : "#자유대화";
         }
 
         public string GetServerKey()
@@ -172,7 +283,7 @@ namespace NyaaChatNative
 
         public List<ChatMessageItem> GetOrCreateRoomHistory(string roomId)
         {
-            if (string.IsNullOrEmpty(roomId)) roomId = "#자유대화";
+            if (string.IsNullOrEmpty(roomId)) roomId = GetDefaultSessionRoom();
             if (!this.RoomMessages.ContainsKey(roomId))
             {
                 this.RoomMessages[roomId] = new List<ChatMessageItem>();
@@ -186,6 +297,41 @@ namespace NyaaChatNative
             Disconnect(false);
             this.cts = new CancellationTokenSource();
             CancellationToken token = this.cts.Token;
+
+            if (this.IsIrcSession)
+            {
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        await ConnectIrcAsync(token);
+                    }
+                    catch (Exception ex)
+                    {
+                        this.IsConnected = false;
+                        if (!this.ManualDisconnect && !token.IsCancellationRequested && !(ex is OperationCanceledException) && !(ex is ObjectDisposedException))
+                        {
+                            this.form.BeginInvoke((MethodInvoker)delegate
+                            {
+                                this.form.OnSessionConnectionError(this, ex.Message);
+                            });
+                        }
+                    }
+                    finally
+                    {
+                        this.IsConnected = false;
+                        this.form.BeginInvoke((MethodInvoker)delegate
+                        {
+                            this.form.OnSessionDisconnected(this);
+                            if (!this.ManualDisconnect)
+                            {
+                                this.form.ScheduleAutoReconnect(this);
+                            }
+                        });
+                    }
+                }, token);
+                return;
+            }
 
             Task.Run(async () =>
             {
@@ -241,10 +387,13 @@ namespace NyaaChatNative
                 catch (Exception ex)
                 {
                     this.IsConnected = false;
-                    this.form.BeginInvoke((MethodInvoker)delegate
+                    if (!this.ManualDisconnect && !token.IsCancellationRequested && !(ex is OperationCanceledException) && !(ex is ObjectDisposedException))
                     {
-                        this.form.OnSessionConnectionError(this, ex.Message);
-                    });
+                        this.form.BeginInvoke((MethodInvoker)delegate
+                        {
+                            this.form.OnSessionConnectionError(this, ex.Message);
+                        });
+                    }
                 }
                 finally
                 {
@@ -259,6 +408,1229 @@ namespace NyaaChatNative
                     });
                 }
             }, token);
+        }
+
+        private static bool ValidateIrcCertificate(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors sslPolicyErrors)
+        {
+            return true;
+        }
+
+        public static void ParseIrcEndpoint(string url, out string targetHost, out int targetPort, out bool useSsl, out string channel)
+        {
+            targetHost = "127.0.0.1";
+            targetPort = 6667;
+            useSsl = false;
+            channel = "";
+
+            if (string.IsNullOrEmpty(url)) return;
+            string s = url.Trim();
+
+            if (s.StartsWith("ircs://", StringComparison.OrdinalIgnoreCase))
+            {
+                useSsl = true;
+                targetPort = 6697;
+                s = s.Substring(7);
+            }
+            else if (s.StartsWith("irc://", StringComparison.OrdinalIgnoreCase))
+            {
+                s = s.Substring(6);
+            }
+
+            int slashIdx = s.IndexOf('/');
+            if (slashIdx >= 0)
+            {
+                string chanPart = s.Substring(slashIdx + 1).Trim();
+                if (!string.IsNullOrEmpty(chanPart))
+                {
+                    channel = chanPart.StartsWith("#") ? chanPart : "#" + chanPart;
+                }
+                s = s.Substring(0, slashIdx).Trim();
+            }
+
+            if (s.Contains(":"))
+            {
+                string[] parts = s.Split(new char[] { ':' }, 2);
+                targetHost = parts[0].Trim();
+                string portStr = parts[1].Trim();
+                if (portStr.StartsWith("+"))
+                {
+                    useSsl = true;
+                    portStr = portStr.Substring(1);
+                }
+                int p;
+                if (int.TryParse(portStr, out p) && p > 0 && p <= 65535)
+                {
+                    targetPort = p;
+                    if (p == 6697 || p == 7000)
+                    {
+                        useSsl = true;
+                    }
+                }
+            }
+            else
+            {
+                targetHost = s.Trim();
+                if (useSsl)
+                {
+                    targetPort = 6697;
+                }
+            }
+        }
+
+        private async Task ConnectIrcAsync(CancellationToken token)
+        {
+            string targetHost;
+            int targetPort;
+            bool useSsl;
+            string urlChan;
+            ParseIrcEndpoint(this.ServerUrl, out targetHost, out targetPort, out useSsl, out urlChan);
+
+            if (!string.IsNullOrEmpty(urlChan))
+            {
+                this.InitialTargetChannel = urlChan;
+            }
+
+            try
+            {
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | (SecurityProtocolType)12288;
+            }
+            catch
+            {
+                try { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; } catch { }
+            }
+
+            IPAddress[] addrs = await Dns.GetHostAddressesAsync(targetHost);
+            IPAddress targetIp = null;
+            for (int i = 0; i < addrs.Length; i++)
+            {
+                if (addrs[i].AddressFamily == AddressFamily.InterNetwork)
+                {
+                    targetIp = addrs[i];
+                    break;
+                }
+            }
+            if (targetIp == null && addrs.Length > 0)
+            {
+                targetIp = addrs[0];
+            }
+            if (targetIp == null)
+            {
+                throw new Exception("DNS 호스트 주소 조회에 실패했습니다: " + targetHost);
+            }
+
+            this.ircTcp = new TcpClient();
+            this.ircTcp.NoDelay = true;
+            await this.ircTcp.ConnectAsync(targetIp, targetPort);
+
+            if (useSsl)
+            {
+                SslStream ssl = new SslStream(this.ircTcp.GetStream(), false, new RemoteCertificateValidationCallback(ValidateIrcCertificate));
+                SslProtocols protocols = SslProtocols.Tls12;
+                try
+                {
+                    protocols = SslProtocols.Tls12 | (SslProtocols)12288;
+                }
+                catch { }
+
+                await ssl.AuthenticateAsClientAsync(targetHost, null, protocols, false);
+                this.ircStream = ssl;
+            }
+            else
+            {
+                this.ircStream = this.ircTcp.GetStream();
+            }
+
+            this.ircReader = new StreamReader(this.ircStream, new UTF8Encoding(false));
+            this.ircWriter = new StreamWriter(this.ircStream, new UTF8Encoding(false)) { AutoFlush = true, NewLine = "\r\n" };
+
+            // PASS is only sent if explicitly marked with serverpass:
+            if (!string.IsNullOrEmpty(this.NickPassword) && this.NickPassword.StartsWith("serverpass:", StringComparison.OrdinalIgnoreCase))
+            {
+                SendIrcRaw("PASS " + this.NickPassword.Substring(11));
+            }
+
+            string safeNick = MakeIrcSafeNickname(this.MyNickname);
+            this.MyNickname = safeNick;
+            string safeIdent = MakeIrcSafeIdent(this.MyUserId);
+
+            SendIrcRaw("NICK " + safeNick);
+            SendIrcRaw(string.Format("USER {0} 0 * :{1}", safeIdent, safeNick));
+
+            while (!token.IsCancellationRequested && this.ircTcp != null && this.ircTcp.Connected)
+            {
+                string line = await this.ircReader.ReadLineAsync();
+                if (line == null) break;
+                HandleIncomingIrcLine(line);
+            }
+        }
+
+        public void SendIrcRaw(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return;
+            try
+            {
+                lock (this.ircSendLock)
+                {
+                    if (this.ircWriter != null)
+                    {
+                        this.ircWriter.WriteLine(raw.TrimEnd('\r', '\n'));
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static string GetNickFromPrefix(string prefix)
+        {
+            if (string.IsNullOrEmpty(prefix)) return "";
+            int excl = prefix.IndexOf('!');
+            if (excl >= 0) return prefix.Substring(0, excl);
+            int at = prefix.IndexOf('@');
+            if (at >= 0) return prefix.Substring(0, at);
+            return prefix;
+        }
+
+        private void AddUserToIrcChannel(string nick, string channel, bool isOp)
+        {
+            if (string.IsNullOrEmpty(nick) || string.IsNullOrEmpty(channel)) return;
+            OnlineUserInfo user = null;
+            for (int i = 0; i < this.OnlineUsers.Count; i++)
+            {
+                if (string.Equals(this.OnlineUsers[i].Nickname, nick, StringComparison.OrdinalIgnoreCase))
+                {
+                    user = this.OnlineUsers[i];
+                    break;
+                }
+            }
+            if (user == null)
+            {
+                user = new OnlineUserInfo
+                {
+                    UserId = nick,
+                    Nickname = nick,
+                    Avatar = isOp ? "👑" : "👤",
+                    IsServerOper = false,
+                    IsBot = false,
+                    CurrentRoom = channel
+                };
+                this.OnlineUsers.Add(user);
+            }
+            if (!user.JoinedChannels.Contains(channel))
+            {
+                user.JoinedChannels.Add(channel);
+            }
+            if (isOp && user.Avatar == "👤")
+            {
+                user.Avatar = "👑";
+            }
+        }
+
+        private void RemoveUserFromIrcChannel(string nick, string channel)
+        {
+            if (string.IsNullOrEmpty(nick) || string.IsNullOrEmpty(channel)) return;
+            for (int i = 0; i < this.OnlineUsers.Count; i++)
+            {
+                OnlineUserInfo u = this.OnlineUsers[i];
+                if (string.Equals(u.Nickname, nick, StringComparison.OrdinalIgnoreCase))
+                {
+                    u.JoinedChannels.Remove(channel);
+                    if (u.JoinedChannels.Count == 0)
+                    {
+                        this.OnlineUsers.RemoveAt(i);
+                    }
+                    break;
+                }
+            }
+            if (this.Channels.ContainsKey(channel))
+            {
+                this.Channels[channel].Operators.Remove(nick);
+            }
+        }
+
+        private bool IsUserOpInChannel(string channel, string nick)
+        {
+            if (string.IsNullOrEmpty(channel) || string.IsNullOrEmpty(nick)) return false;
+            if (this.Channels.ContainsKey(channel))
+            {
+                return this.Channels[channel].Operators.Contains(nick);
+            }
+            return false;
+        }
+
+        private void ParseIrcNamesReply(string channel, string namesTrailing)
+        {
+            if (string.IsNullOrEmpty(channel) || string.IsNullOrEmpty(namesTrailing)) return;
+            if (!this.Channels.ContainsKey(channel))
+            {
+                this.Channels[channel] = new ChannelItemInfo
+                {
+                    Id = channel,
+                    Name = channel,
+                    Topic = "",
+                    UserCount = 0
+                };
+            }
+            ChannelItemInfo chInfo = this.Channels[channel];
+
+            string[] tokens = namesTrailing.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < tokens.Length; i++)
+            {
+                string tok = tokens[i].Trim();
+                if (string.IsNullOrEmpty(tok)) continue;
+                bool isOp = false;
+                while (tok.Length > 0 && (tok[0] == '@' || tok[0] == '+' || tok[0] == '~' || tok[0] == '&' || tok[0] == '%'))
+                {
+                    if (tok[0] == '@' || tok[0] == '~' || tok[0] == '&')
+                    {
+                        isOp = true;
+                    }
+                    tok = tok.Substring(1);
+                }
+                if (string.IsNullOrEmpty(tok)) continue;
+
+                if (isOp && !chInfo.Operators.Contains(tok))
+                {
+                    chInfo.Operators.Add(tok);
+                }
+                AddUserToIrcChannel(tok, channel, isOp);
+            }
+            chInfo.UserCount = Math.Max(chInfo.UserCount, tokens.Length);
+        }
+
+        private void HandleIncomingIrcLine(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return;
+            line = line.TrimEnd('\r', '\n');
+            if (line.Length == 0) return;
+
+            string prefix = "";
+            string trailing = null;
+            string commandAndParams = line;
+
+            if (commandAndParams.StartsWith(":"))
+            {
+                int firstSpace = commandAndParams.IndexOf(' ');
+                if (firstSpace > 0)
+                {
+                    prefix = commandAndParams.Substring(1, firstSpace - 1);
+                    commandAndParams = commandAndParams.Substring(firstSpace + 1).TrimStart();
+                }
+            }
+
+            int colonIdx = commandAndParams.IndexOf(" :");
+            if (colonIdx >= 0)
+            {
+                trailing = commandAndParams.Substring(colonIdx + 2);
+                commandAndParams = commandAndParams.Substring(0, colonIdx).TrimEnd();
+            }
+
+            string[] parts = commandAndParams.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0) return;
+            string command = parts[0].ToUpperInvariant();
+            List<string> args = new List<string>();
+            for (int i = 1; i < parts.Length; i++)
+            {
+                args.Add(parts[i]);
+            }
+            if (trailing != null)
+            {
+                args.Add(trailing);
+            }
+
+            if (command == "PING")
+            {
+                string pingToken = (trailing != null) ? trailing : (args.Count > 0 ? args[0] : "");
+                SendIrcRaw("PONG :" + pingToken);
+                return;
+            }
+
+            if (command == "PONG")
+            {
+                string pongToken = (trailing != null) ? trailing : (args.Count > 0 ? args[0] : "");
+                long sentTime;
+                if (long.TryParse(pongToken, out sentTime))
+                {
+                    long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    int rtt = (int)Math.Max(0, now - sentTime);
+                    this.PingMs = rtt;
+                    Dictionary<string, object> pongData = new Dictionary<string, object> { { "t", sentTime } };
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        this.form.OnSessionSocketEvent(this, "server_pong", pongData);
+                    });
+                }
+                return;
+            }
+
+            if (command == "ERROR")
+            {
+                string errMsg = trailing ?? (args.Count > 0 ? string.Join(" ", args.ToArray()) : "IRC 서버 연결이 종료되었습니다.");
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.AppendSystemMessageToSession(this, GetDefaultSessionRoom(), "* [IRC 서버 연결 종료] " + errMsg);
+                });
+                return;
+            }
+
+            if (command == "001") // RPL_WELCOME
+            {
+                this.IsConnected = true;
+                this.ReconnectAttempts = 0;
+                if (args.Count > 0 && !string.IsNullOrEmpty(args[0]))
+                {
+                    this.MyNickname = args[0];
+                }
+
+                // If user configured a NickServ password (not serverpass:), identify automatically
+                if (!string.IsNullOrEmpty(this.NickPassword) && !this.NickPassword.StartsWith("serverpass:", StringComparison.OrdinalIgnoreCase))
+                {
+                    SendIrcRaw("PRIVMSG NickServ :IDENTIFY " + this.NickPassword);
+                }
+
+                string targetRoom = string.IsNullOrEmpty(this.InitialTargetChannel) ? "#nyaa" : this.InitialTargetChannel;
+                if (HasNonAscii(targetRoom)) targetRoom = "#nyaa";
+                if (!targetRoom.StartsWith("#") && !targetRoom.StartsWith("&")) targetRoom = "#" + targetRoom;
+                this.InitialTargetChannel = targetRoom;
+
+                Dictionary<string, object> sInfo = new Dictionary<string, object>
+                {
+                    { "serverName", string.IsNullOrEmpty(this.ServerName) ? this.Host : this.ServerName },
+                    { "protocol", "IRC (RFC 1459/2812)" }
+                };
+                Dictionary<string, object> uInfo = new Dictionary<string, object>
+                {
+                    { "userId", this.MyUserId },
+                    { "nickname", this.MyNickname },
+                    { "isServerOper", false },
+                    { "currentRoom", targetRoom }
+                };
+                Dictionary<string, object> initState = new Dictionary<string, object>
+                {
+                    { "serverInfo", sInfo },
+                    { "user", uInfo },
+                    { "channels", new object[0] },
+                    { "users", new object[0] }
+                };
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.OnSessionSocketConnected(this);
+                    this.form.OnSessionSocketEvent(this, "init_state", initState);
+                });
+
+                if (!string.IsNullOrEmpty(this.InitialTargetChannel))
+                {
+                    if (!string.IsNullOrEmpty(this.InitialChannelKey))
+                    {
+                        SendIrcRaw(string.Format("JOIN {0} {1}", this.InitialTargetChannel, this.InitialChannelKey));
+                    }
+                    else
+                    {
+                        SendIrcRaw("JOIN " + this.InitialTargetChannel);
+                    }
+                }
+                return;
+            }
+
+            if (command == "002" || command == "003" || command == "004" || command == "005" || command == "251" || command == "255")
+            {
+                string infoText = trailing ?? (args.Count > 1 ? args[1] : "");
+                if (!string.IsNullOrEmpty(infoText))
+                {
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        this.form.AppendSystemMessageToSession(this, GetDefaultSessionRoom(), "* [IRC] " + infoText);
+                    });
+                }
+                return;
+            }
+
+            if (command == "372" || command == "375" || command == "376") // MOTD
+            {
+                string motdLine = trailing ?? (args.Count > 1 ? args[1] : "");
+                if (!string.IsNullOrEmpty(motdLine))
+                {
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        this.form.AppendSystemMessageToSession(this, GetDefaultSessionRoom(), "* [MOTD] " + motdLine);
+                    });
+                }
+                return;
+            }
+
+            if (command == "JOIN")
+            {
+                string joinerNick = GetNickFromPrefix(prefix);
+                string ch = args.Count > 0 ? args[0] : (trailing ?? "");
+                if (ch.StartsWith(":")) ch = ch.Substring(1);
+                if (string.IsNullOrEmpty(ch)) return;
+
+                if (string.Equals(joinerNick, this.MyNickname, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!this.Channels.ContainsKey(ch))
+                    {
+                        this.Channels[ch] = new ChannelItemInfo
+                        {
+                            Id = ch,
+                            Name = ch,
+                            Topic = "",
+                            UserCount = 1
+                        };
+                    }
+                    AddUserToIrcChannel(this.MyNickname, ch, false);
+                    Dictionary<string, object> roomMeta = new Dictionary<string, object>
+                    {
+                        { "id", ch },
+                        { "name", ch },
+                        { "topic", "" }
+                    };
+                    Dictionary<string, object> switched = new Dictionary<string, object>
+                    {
+                        { "roomMeta", roomMeta }
+                    };
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        this.form.OnSessionSocketEvent(this, "room_switched", switched);
+                        this.form.RefreshLeftServerTree();
+                    });
+                    SendIrcRaw("MODE " + ch);
+                }
+                else
+                {
+                    AddUserToIrcChannel(joinerNick, ch, false);
+                    if (this.Channels.ContainsKey(ch))
+                    {
+                        this.Channels[ch].UserCount++;
+                    }
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        this.form.AppendSystemMessageToSession(this, ch, string.Format(this.form.Tr("* [{0}] 님이 입장하셨습니다.", "* [{0}] has joined."), joinerNick));
+                        this.form.RefreshRightUsersList();
+                    });
+                }
+                return;
+            }
+
+            if (command == "PART")
+            {
+                string parterNick = GetNickFromPrefix(prefix);
+                string ch = args.Count > 0 ? args[0] : "";
+                string reason = trailing ?? (args.Count > 1 ? args[1] : "");
+
+                if (string.Equals(parterNick, this.MyNickname, StringComparison.OrdinalIgnoreCase))
+                {
+                    this.Channels.Remove(ch);
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        this.form.RefreshLeftServerTree();
+                        if (this.form.ActiveSession == this && string.Equals(this.form.ActiveRoomId, ch, StringComparison.OrdinalIgnoreCase))
+                        {
+                            string fallbackRoom = this.Channels.Count > 0 ? new List<string>(this.Channels.Keys)[0] : this.InitialTargetChannel;
+                            this.form.SwitchActiveView(this, fallbackRoom);
+                        }
+                    });
+                }
+                else
+                {
+                    RemoveUserFromIrcChannel(parterNick, ch);
+                    if (this.Channels.ContainsKey(ch))
+                    {
+                        this.Channels[ch].UserCount = Math.Max(1, this.Channels[ch].UserCount - 1);
+                    }
+                    string msg = string.IsNullOrEmpty(reason)
+                        ? string.Format(this.form.Tr("* [{0}] 님이 퇴장하셨습니다.", "* [{0}] has left."), parterNick)
+                        : string.Format(this.form.Tr("* [{0}] 님이 퇴장하셨습니다. ({1})", "* [{0}] has left. ({1})"), parterNick, reason);
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        this.form.AppendSystemMessageToSession(this, ch, msg);
+                        this.form.RefreshRightUsersList();
+                    });
+                }
+                return;
+            }
+
+            if (command == "QUIT")
+            {
+                string quiterNick = GetNickFromPrefix(prefix);
+                string reason = trailing ?? (args.Count > 0 ? args[0] : "");
+                if (!string.Equals(quiterNick, this.MyNickname, StringComparison.OrdinalIgnoreCase))
+                {
+                    List<string> affectedChannels = new List<string>();
+                    for (int i = 0; i < this.OnlineUsers.Count; i++)
+                    {
+                        OnlineUserInfo u = this.OnlineUsers[i];
+                        if (string.Equals(u.Nickname, quiterNick, StringComparison.OrdinalIgnoreCase))
+                        {
+                            affectedChannels.AddRange(u.JoinedChannels);
+                            this.OnlineUsers.RemoveAt(i);
+                            break;
+                        }
+                    }
+                    string msg = string.IsNullOrEmpty(reason)
+                        ? string.Format(this.form.Tr("* [{0}] 님이 접속을 종료하셨습니다.", "* [{0}] has quit."), quiterNick)
+                        : string.Format(this.form.Tr("* [{0}] 님이 접속을 종료하셨습니다. ({1})", "* [{0}] has quit. ({1})"), quiterNick, reason);
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        for (int c = 0; c < affectedChannels.Count; c++)
+                        {
+                            string ch = affectedChannels[c];
+                            if (this.Channels.ContainsKey(ch))
+                            {
+                                this.Channels[ch].UserCount = Math.Max(1, this.Channels[ch].UserCount - 1);
+                                this.Channels[ch].Operators.Remove(quiterNick);
+                                this.form.AppendSystemMessageToSession(this, ch, msg);
+                            }
+                        }
+                        this.form.RefreshRightUsersList();
+                    });
+                }
+                return;
+            }
+
+            if (command == "NICK")
+            {
+                string oldNick = GetNickFromPrefix(prefix);
+                string newNick = args.Count > 0 ? args[0] : (trailing ?? "");
+                if (string.Equals(oldNick, this.MyNickname, StringComparison.OrdinalIgnoreCase))
+                {
+                    this.MyNickname = newNick;
+                    Dictionary<string, object> nd = new Dictionary<string, object> { { "nickname", newNick } };
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        this.form.OnSessionSocketEvent(this, "nickname_changed", nd);
+                    });
+                }
+                else
+                {
+                    for (int i = 0; i < this.OnlineUsers.Count; i++)
+                    {
+                        if (string.Equals(this.OnlineUsers[i].Nickname, oldNick, StringComparison.OrdinalIgnoreCase))
+                        {
+                            this.OnlineUsers[i].Nickname = newNick;
+                            break;
+                        }
+                    }
+                    foreach (ChannelItemInfo ch in this.Channels.Values)
+                    {
+                        if (ch.Operators.Contains(oldNick))
+                        {
+                            ch.Operators.Remove(oldNick);
+                            ch.Operators.Add(newNick);
+                        }
+                    }
+                    string msg = string.Format(this.form.Tr("* [{0}] 님이 닉네임을 [{1}](으)로 변경했습니다.", "* [{0}] is now known as [{1}]."), oldNick, newNick);
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        this.form.AppendSystemMessageToSession(this, this.form.ActiveRoomId, msg);
+                        this.form.RefreshRightUsersList();
+                    });
+                }
+                return;
+            }
+
+            if (command == "PRIVMSG")
+            {
+                string senderNick = GetNickFromPrefix(prefix);
+                string target = args.Count > 0 ? args[0] : "";
+                string text = trailing ?? (args.Count > 1 ? args[1] : "");
+
+                string msgType = "text";
+                string content = text;
+                if (text.StartsWith("\x01ACTION ") && text.EndsWith("\x01"))
+                {
+                    msgType = "action";
+                    content = text.Substring(8, text.Length - 9);
+                }
+
+                string roomId = target;
+                if (!target.StartsWith("#") && !target.StartsWith("&") && !target.StartsWith("+"))
+                {
+                    roomId = senderNick;
+                    if (!this.Channels.ContainsKey(roomId))
+                    {
+                        this.Channels[roomId] = new ChannelItemInfo
+                        {
+                            Id = roomId,
+                            Name = "@" + roomId,
+                            Topic = "1:1 대화",
+                            UserCount = 2,
+                            IsPrivate = true
+                        };
+                        this.form.BeginInvoke((MethodInvoker)delegate
+                        {
+                            this.form.RefreshLeftServerTree();
+                        });
+                    }
+                }
+
+                bool isOp = IsUserOpInChannel(roomId, senderNick);
+                Dictionary<string, object> sender = new Dictionary<string, object>
+                {
+                    { "nickname", senderNick },
+                    { "userId", prefix },
+                    { "isOp", isOp },
+                    { "isBot", false }
+                };
+                Dictionary<string, object> msgData = new Dictionary<string, object>
+                {
+                    { "id", Guid.NewGuid().ToString("N") },
+                    { "roomId", roomId },
+                    { "type", msgType },
+                    { "content", content },
+                    { "timestamp", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() },
+                    { "sender", sender }
+                };
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.OnSessionSocketEvent(this, "new_message", msgData);
+                });
+                return;
+            }
+
+            if (command == "NOTICE")
+            {
+                string senderNick = GetNickFromPrefix(prefix);
+                string target = args.Count > 0 ? args[0] : "";
+                string text = trailing ?? (args.Count > 1 ? args[1] : "");
+                string targetRoom = target.StartsWith("#") ? target : GetDefaultSessionRoom();
+                string senderDisplay = string.IsNullOrEmpty(senderNick) ? "[IRC]" : "-" + senderNick + "-";
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.AppendSystemMessageToSession(this, targetRoom, string.Format("*{0}* {1}", senderDisplay, text));
+                });
+                return;
+            }
+
+            if (command == "TOPIC" || command == "332") // RPL_TOPIC
+            {
+                string ch = "";
+                string topicText = "";
+                string setterNick = GetNickFromPrefix(prefix);
+
+                if (command == "332")
+                {
+                    ch = args.Count > 1 ? args[1] : "";
+                    topicText = trailing ?? (args.Count > 2 ? args[2] : "");
+                }
+                else
+                {
+                    ch = args.Count > 0 ? args[0] : "";
+                    topicText = trailing ?? (args.Count > 1 ? args[1] : "");
+                }
+
+                if (!string.IsNullOrEmpty(ch))
+                {
+                    if (this.Channels.ContainsKey(ch))
+                    {
+                        this.Channels[ch].Topic = topicText;
+                    }
+                    Dictionary<string, object> topObj = new Dictionary<string, object>
+                    {
+                        { "roomId", ch },
+                        { "topic", topicText }
+                    };
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        this.form.OnSessionSocketEvent(this, "topic_updated", topObj);
+                        if (command == "TOPIC" && !string.IsNullOrEmpty(setterNick))
+                        {
+                            this.form.AppendSystemMessageToSession(this, ch, string.Format("* [{0}] 님이 채널 토픽을 변경했습니다: {1}", setterNick, topicText));
+                        }
+                    });
+                }
+                return;
+            }
+
+            if (command == "353") // RPL_NAMREPLY
+            {
+                string channel = "";
+                for (int i = 0; i < args.Count; i++)
+                {
+                    if (args[i].StartsWith("#") || args[i].StartsWith("&"))
+                    {
+                        channel = args[i];
+                        break;
+                    }
+                }
+                string namesTrailing = trailing ?? (args.Count > 0 ? args[args.Count - 1] : "");
+                ParseIrcNamesReply(channel, namesTrailing);
+                return;
+            }
+
+            if (command == "366") // RPL_ENDOFNAMES
+            {
+                string channel = "";
+                for (int i = 0; i < args.Count; i++)
+                {
+                    if (args[i].StartsWith("#") || args[i].StartsWith("&"))
+                    {
+                        channel = args[i];
+                        break;
+                    }
+                }
+                if (!string.IsNullOrEmpty(channel) && this.Channels.ContainsKey(channel))
+                {
+                    int count = 0;
+                    for (int i = 0; i < this.OnlineUsers.Count; i++)
+                    {
+                        if (this.OnlineUsers[i].JoinedChannels.Contains(channel)) count++;
+                    }
+                    this.Channels[channel].UserCount = Math.Max(1, count);
+                }
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.RefreshLeftServerTree();
+                    this.form.RefreshRightUsersList();
+                });
+                return;
+            }
+
+            if (command == "324") // RPL_CHANNELMODEIS
+            {
+                string channel = args.Count > 1 ? args[1] : "";
+                string modes = args.Count > 2 ? args[2] : (trailing ?? "");
+                if (this.Channels.ContainsKey(channel))
+                {
+                    this.Channels[channel].Modes = modes;
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        this.form.UpdateHeaderAndModuleBar();
+                    });
+                }
+                return;
+            }
+
+            if (command == "MODE")
+            {
+                string channel = args.Count > 0 ? args[0] : "";
+                if (channel.StartsWith("#") && args.Count >= 2)
+                {
+                    string modeStr = args[1];
+                    string targetArg = args.Count >= 3 ? args[2] : (trailing ?? "");
+                    bool isPlus = true;
+                    for (int mi = 0; mi < modeStr.Length; mi++)
+                    {
+                        char c = modeStr[mi];
+                        if (c == '+') isPlus = true;
+                        else if (c == '-') isPlus = false;
+                        else if (c == 'o' && !string.IsNullOrEmpty(targetArg))
+                        {
+                            if (this.Channels.ContainsKey(channel))
+                            {
+                                if (isPlus && !this.Channels[channel].Operators.Contains(targetArg))
+                                {
+                                    this.Channels[channel].Operators.Add(targetArg);
+                                }
+                                else if (!isPlus)
+                                {
+                                    this.Channels[channel].Operators.Remove(targetArg);
+                                }
+                            }
+                        }
+                    }
+                    string modeMsg = string.Format("* [{0}] 모드 변경: {1} {2}", channel, modeStr, targetArg).Trim();
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        this.form.AppendSystemMessageToSession(this, channel, modeMsg);
+                        this.form.RefreshRightUsersList();
+                    });
+                }
+                return;
+            }
+
+            if (command == "KICK")
+            {
+                string channel = args.Count > 0 ? args[0] : "";
+                string kickedNick = args.Count > 1 ? args[1] : "";
+                string kickerNick = GetNickFromPrefix(prefix);
+                string reason = trailing ?? (args.Count > 2 ? args[2] : "");
+
+                if (string.Equals(kickedNick, this.MyNickname, StringComparison.OrdinalIgnoreCase))
+                {
+                    this.Channels.Remove(channel);
+                    string kickNotice = string.Format(this.form.Tr("* [{0}] {1} 님에 의해 강퇴되었습니다. ({2})", "* [{0}] You were kicked by {1}. ({2})"), channel, kickerNick, reason);
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        this.form.AppendSystemMessageToSession(this, this.form.ActiveRoomId, kickNotice);
+                        this.form.RefreshLeftServerTree();
+                    });
+                }
+                else
+                {
+                    RemoveUserFromIrcChannel(kickedNick, channel);
+                    if (this.Channels.ContainsKey(channel))
+                    {
+                        this.Channels[channel].UserCount = Math.Max(1, this.Channels[channel].UserCount - 1);
+                    }
+                    string kickNotice = string.Format(this.form.Tr("* [{0}] {1} 님이 {2} 님에 의해 강퇴되었습니다. ({3})", "* [{0}] {1} was kicked by {2}. ({3})"), channel, kickedNick, kickerNick, reason);
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        this.form.AppendSystemMessageToSession(this, channel, kickNotice);
+                        this.form.RefreshRightUsersList();
+                    });
+                }
+                return;
+            }
+
+            if (command == "311") // RPL_WHOISUSER
+            {
+                string nick = args.Count > 1 ? args[1] : "";
+                string user = args.Count > 2 ? args[2] : "";
+                string host = args.Count > 3 ? args[3] : "";
+                string real = trailing ?? (args.Count > 5 ? args[5] : "");
+                string whoisText = string.Format("* [WHOIS {0}] 사용자: {1}@{2} ({3})", nick, user, host, real);
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.AppendSystemMessageToSession(this, GetDefaultSessionRoom(), whoisText);
+                });
+                return;
+            }
+
+            if (command == "319") // RPL_WHOISCHANNELS
+            {
+                string nick = args.Count > 1 ? args[1] : "";
+                string chs = trailing ?? (args.Count > 2 ? args[2] : "");
+                string whoisText = string.Format("* [WHOIS {0}] 참여 채널: {1}", nick, chs);
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.AppendSystemMessageToSession(this, GetDefaultSessionRoom(), whoisText);
+                });
+                return;
+            }
+
+            if (command == "312") // RPL_WHOISSERVER
+            {
+                string nick = args.Count > 1 ? args[1] : "";
+                string srv = args.Count > 2 ? args[2] : "";
+                string srvInfo = trailing ?? (args.Count > 3 ? args[3] : "");
+                string whoisText = string.Format("* [WHOIS {0}] 서버: {1} ({2})", nick, srv, srvInfo);
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.AppendSystemMessageToSession(this, GetDefaultSessionRoom(), whoisText);
+                });
+                return;
+            }
+
+            if (command == "322") // RPL_LIST
+            {
+                string ch = args.Count > 1 ? args[1] : "";
+                string numUsers = args.Count > 2 ? args[2] : "0";
+                string topic = trailing ?? (args.Count > 3 ? args[3] : "");
+                string lineTxt = string.Format("* [채널목록] {0} ({1}명) - {2}", ch, numUsers, topic);
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.AppendSystemMessageToSession(this, GetDefaultSessionRoom(), lineTxt);
+                });
+                return;
+            }
+
+            if (command == "432") // ERR_ERRONEUSNICKNAME
+            {
+                string badNick = args.Count > 1 ? args[1] : this.MyNickname;
+                string fallback = "Nyaa_" + new Random().Next(100, 999);
+                this.MyNickname = fallback;
+                SendIrcRaw("NICK " + this.MyNickname);
+                SendIrcRaw(string.Format("USER {0} 0 * :{1}", MakeIrcSafeIdent(this.MyUserId), this.MyNickname));
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.AppendSystemMessageToSession(this, GetDefaultSessionRoom(),
+                        string.Format(this.form.Tr("* IRC 규격에 맞지 않는 닉네임 '{0}'(오류 432)이 감지되어 '{1}'(으)로 자동 변경했습니다.",
+                                                "* Nickname '{0}' is erroneous for IRC (432). Switched to '{1}'."), badNick, fallback));
+                });
+                return;
+            }
+
+            if (command == "433") // ERR_NICKNAMEINUSE
+            {
+                string badNick = args.Count > 1 ? args[1] : this.MyNickname;
+                string newNick;
+                if (badNick.Length >= 12)
+                {
+                    newNick = badNick.Substring(0, 9) + "_" + new Random().Next(10, 99);
+                }
+                else
+                {
+                    newNick = badNick + "_";
+                }
+                this.MyNickname = newNick;
+                SendIrcRaw("NICK " + this.MyNickname);
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.AppendSystemMessageToSession(this, GetDefaultSessionRoom(),
+                        string.Format(this.form.Tr("* 닉네임 '{0}'이(가) 이미 사용 중입니다. '{1}'(으)로 재시도합니다.",
+                                                "* Nickname '{0}' is already in use. Retrying with '{1}'."), badNick, this.MyNickname));
+                });
+                return;
+            }
+
+            if (command == "464") // ERR_PASSWDMISMATCH
+            {
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.AppendSystemMessageToSession(this, GetDefaultSessionRoom(),
+                        this.form.Tr("* [IRC 오류 464] 서버 비밀번호가 일치하지 않습니다. 일반 IRC 네트워크는 서버 비밀번호(PASS)가 필요하지 않습니다.",
+                                     "* [IRC Error 464] Password incorrect. Standard IRC networks do not require a server password (PASS)."));
+                });
+                return;
+            }
+
+            if (command == "403" || command == "479") // ERR_NOSUCHCHANNEL / ERR_ILLEGALCHANNELNAME
+            {
+                string badChan = args.Count > 1 ? args[1] : "";
+                string errText = trailing ?? "채널에 입장할 수 없습니다.";
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.AppendSystemMessageToSession(this, GetDefaultSessionRoom(),
+                        string.Format(this.form.Tr("* [IRC 채널 오류 {0}] '{1}': {2}", "* [IRC Channel Error {0}] '{1}': {2}"), command, badChan, errText));
+                });
+                return;
+            }
+
+            if (command == "475") // ERR_BADCHANNELKEY
+            {
+                string ch = args.Count > 1 ? args[1] : "";
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.OnSessionSocketEvent(this, "channel_key_required", new Dictionary<string, object>
+                    {
+                        { "channelId", ch },
+                        { "message", "IRC 채널 비밀번호(+k)가 필요합니다." }
+                    });
+                });
+                return;
+            }
+
+            if (command.StartsWith("4") || command.StartsWith("5")) // Generic IRC errors
+            {
+                string errText = trailing ?? (args.Count > 1 ? args[1] : command);
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.AppendSystemMessageToSession(this, GetDefaultSessionRoom(), "* [IRC 오류 " + command + "] " + errText);
+                });
+                return;
+            }
+        }
+
+        private void HandleIrcEmit(string eventName, object payload)
+        {
+            Dictionary<string, object> data = payload as Dictionary<string, object>;
+
+            if (eventName == "send_message" && data != null)
+            {
+                string roomId = data.ContainsKey("roomId") ? Convert.ToString(data["roomId"]) : this.InitialTargetChannel;
+                string content = data.ContainsKey("content") ? Convert.ToString(data["content"]) : "";
+                string type = data.ContainsKey("type") ? Convert.ToString(data["type"]) : "text";
+
+                if (type == "action")
+                {
+                    SendIrcRaw(string.Format("PRIVMSG {0} :\x01ACTION {1}\x01", roomId, content));
+                }
+                else
+                {
+                    SendIrcRaw(string.Format("PRIVMSG {0} :{1}", roomId, content));
+                }
+
+                Dictionary<string, object> sender = new Dictionary<string, object>
+                {
+                    { "nickname", this.MyNickname },
+                    { "userId", this.MyUserId },
+                    { "isOp", IsUserOpInChannel(roomId, this.MyNickname) },
+                    { "isBot", false }
+                };
+                Dictionary<string, object> msgData = new Dictionary<string, object>
+                {
+                    { "id", Guid.NewGuid().ToString("N") },
+                    { "roomId", roomId },
+                    { "type", type },
+                    { "content", content },
+                    { "timestamp", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() },
+                    { "sender", sender }
+                };
+                this.form.BeginInvoke((MethodInvoker)delegate
+                {
+                    this.form.OnSessionSocketEvent(this, "new_message", msgData);
+                });
+                return;
+            }
+
+            if (eventName == "join_channel" && data != null)
+            {
+                string ch = data.ContainsKey("channelName") ? Convert.ToString(data["channelName"]) : "";
+                string key = data.ContainsKey("key") ? Convert.ToString(data["key"]) : "";
+                if (!string.IsNullOrEmpty(ch))
+                {
+                    if (!string.IsNullOrEmpty(key))
+                    {
+                        SendIrcRaw(string.Format("JOIN {0} {1}", ch, key));
+                    }
+                    else
+                    {
+                        SendIrcRaw("JOIN " + ch);
+                    }
+                }
+                return;
+            }
+
+            if (eventName == "leave_channel" || eventName == "part_channel")
+            {
+                string ch = "";
+                if (data != null)
+                {
+                    if (data.ContainsKey("channelName")) ch = Convert.ToString(data["channelName"]);
+                    else if (data.ContainsKey("roomId")) ch = Convert.ToString(data["roomId"]);
+                }
+                if (!string.IsNullOrEmpty(ch))
+                {
+                    SendIrcRaw("PART " + ch + " :NyaaChat");
+                }
+                return;
+            }
+
+            if (eventName == "switch_room" && data != null)
+            {
+                string targetId = data.ContainsKey("targetId") ? Convert.ToString(data["targetId"]) : "";
+                if (!string.IsNullOrEmpty(targetId))
+                {
+                    this.form.BeginInvoke((MethodInvoker)delegate
+                    {
+                        this.form.SwitchActiveView(this, targetId);
+                    });
+                }
+                return;
+            }
+
+            if (eventName == "change_nickname" && data != null)
+            {
+                string newNick = data.ContainsKey("newNickname") ? Convert.ToString(data["newNickname"]) : "";
+                if (!string.IsNullOrEmpty(newNick))
+                {
+                    string safeNick = MakeIrcSafeNickname(newNick);
+                    if (!string.Equals(safeNick, newNick, StringComparison.Ordinal))
+                    {
+                        this.form.BeginInvoke((MethodInvoker)delegate
+                        {
+                            this.form.AppendSystemMessageToSession(this, GetDefaultSessionRoom(),
+                                string.Format(this.form.Tr("* IRC 규격에 맞게 닉네임을 변경합니다: '{0}' -> '{1}'",
+                                                        "* Adjusted nickname for IRC format: '{0}' -> '{1}'"), newNick, safeNick));
+                        });
+                    }
+                    SendIrcRaw("NICK " + safeNick);
+                }
+                return;
+            }
+
+            if (eventName == "set_topic" && data != null)
+            {
+                string ch = data.ContainsKey("channelId") ? Convert.ToString(data["channelId"]) : (data.ContainsKey("roomId") ? Convert.ToString(data["roomId"]) : "");
+                string top = data.ContainsKey("topic") ? Convert.ToString(data["topic"]) : "";
+                if (!string.IsNullOrEmpty(ch))
+                {
+                    SendIrcRaw(string.Format("TOPIC {0} :{1}", ch, top));
+                }
+                return;
+            }
+
+            if (eventName == "set_channel_mode" && data != null)
+            {
+                string ch = data.ContainsKey("roomId") ? Convert.ToString(data["roomId"]) : "";
+                string modeStr = data.ContainsKey("modeStr") ? Convert.ToString(data["modeStr"]) : "";
+                object[] pArr = data.ContainsKey("params") ? data["params"] as object[] : null;
+                string pStr = "";
+                if (pArr != null && pArr.Length > 0)
+                {
+                    List<string> strList = new List<string>();
+                    for (int i = 0; i < pArr.Length; i++) strList.Add(Convert.ToString(pArr[i]));
+                    pStr = " " + string.Join(" ", strList.ToArray());
+                }
+                if (!string.IsNullOrEmpty(ch))
+                {
+                    SendIrcRaw(string.Format("MODE {0} {1}{2}", ch, modeStr, pStr).Trim());
+                }
+                return;
+            }
+
+            if (eventName == "kick_user" && data != null)
+            {
+                string ch = data.ContainsKey("roomId") ? Convert.ToString(data["roomId"]) : "";
+                string targetNick = data.ContainsKey("targetNickname") ? Convert.ToString(data["targetNickname"]) : "";
+                string reason = data.ContainsKey("reason") ? Convert.ToString(data["reason"]) : "Kicked";
+                if (!string.IsNullOrEmpty(ch) && !string.IsNullOrEmpty(targetNick))
+                {
+                    SendIrcRaw(string.Format("KICK {0} {1} :{2}", ch, targetNick, reason));
+                }
+                return;
+            }
+
+            if (eventName == "grant_op" && data != null)
+            {
+                string ch = data.ContainsKey("roomId") ? Convert.ToString(data["roomId"]) : "";
+                string targetNick = data.ContainsKey("targetNickname") ? Convert.ToString(data["targetNickname"]) : "";
+                if (!string.IsNullOrEmpty(ch) && !string.IsNullOrEmpty(targetNick))
+                {
+                    SendIrcRaw(string.Format("MODE {0} +o {1}", ch, targetNick));
+                }
+                return;
+            }
+
+            if (eventName == "revoke_op" && data != null)
+            {
+                string ch = data.ContainsKey("roomId") ? Convert.ToString(data["roomId"]) : "";
+                string targetNick = data.ContainsKey("targetNickname") ? Convert.ToString(data["targetNickname"]) : "";
+                if (!string.IsNullOrEmpty(ch) && !string.IsNullOrEmpty(targetNick))
+                {
+                    SendIrcRaw(string.Format("MODE {0} -o {1}", ch, targetNick));
+                }
+                return;
+            }
+
+            if (eventName == "invite_user" && data != null)
+            {
+                string ch = data.ContainsKey("roomId") ? Convert.ToString(data["roomId"]) : "";
+                string targetNick = data.ContainsKey("targetNickname") ? Convert.ToString(data["targetNickname"]) : "";
+                if (!string.IsNullOrEmpty(ch) && !string.IsNullOrEmpty(targetNick))
+                {
+                    SendIrcRaw(string.Format("INVITE {0} {1}", targetNick, ch));
+                }
+                return;
+            }
+
+            if (eventName == "whois" && data != null)
+            {
+                string target = data.ContainsKey("target") ? Convert.ToString(data["target"]) : "";
+                if (!string.IsNullOrEmpty(target))
+                {
+                    SendIrcRaw("WHOIS " + target);
+                }
+                return;
+            }
+
+            if (eventName == "client_ping")
+            {
+                SendIrcRaw("PING :" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                return;
+            }
+
+            if (eventName == "raw_command")
+            {
+                SendIrcRaw(Convert.ToString(payload));
+                return;
+            }
+
+            if (eventName == "oper_login" && data != null)
+            {
+                string operId = data.ContainsKey("operId") ? Convert.ToString(data["operId"]) : "";
+                string operPw = data.ContainsKey("operPw") ? Convert.ToString(data["operPw"]) : "";
+                if (!string.IsNullOrEmpty(operId))
+                {
+                    SendIrcRaw(string.Format("OPER {0} {1}", operId, operPw));
+                }
+                return;
+            }
+
+            if (eventName == "get_channel_list")
+            {
+                SendIrcRaw("LIST");
+                return;
+            }
         }
 
         private void HandleEngineIoPacket(string packet)
@@ -325,7 +1697,6 @@ namespace NyaaChatNative
         public void StartPingTimer()
         {
             StopPingTimer();
-            // Periodic background ping measuring disabled per user request
         }
 
         public void StopPingTimer()
@@ -343,6 +1714,11 @@ namespace NyaaChatNative
 
         public void Emit(string eventName, object payload)
         {
+            if (this.IsIrcSession)
+            {
+                HandleIrcEmit(eventName, payload);
+                return;
+            }
             try
             {
                 object[] frame = new object[] { eventName, payload };
@@ -392,15 +1768,38 @@ namespace NyaaChatNative
                 if (this.cts != null) this.cts.Cancel();
             }
             catch { }
-            try
+
+            if (this.IsIrcSession)
             {
-                if (this.ws != null)
+                try
                 {
-                    this.ws.Dispose();
-                    this.ws = null;
+                    if (this.ircWriter != null)
+                    {
+                        SendIrcRaw("QUIT :NyaaChat Client");
+                    }
                 }
+                catch { }
+                try
+                {
+                    if (this.ircReader != null) { this.ircReader.Dispose(); this.ircReader = null; }
+                    if (this.ircWriter != null) { this.ircWriter.Dispose(); this.ircWriter = null; }
+                    if (this.ircStream != null) { this.ircStream.Dispose(); this.ircStream = null; }
+                    if (this.ircTcp != null) { this.ircTcp.Close(); this.ircTcp = null; }
+                }
+                catch { }
             }
-            catch { }
+            else
+            {
+                try
+                {
+                    if (this.ws != null)
+                    {
+                        this.ws.Dispose();
+                        this.ws = null;
+                    }
+                }
+                catch { }
+            }
         }
     }
 
@@ -3055,6 +4454,7 @@ namespace NyaaChatNative
             string normUrl = NormalizeUrl(serverUrl);
             if (string.IsNullOrEmpty(normUrl)) return;
 
+            bool isIrc = normUrl.StartsWith("irc://", StringComparison.OrdinalIgnoreCase) || normUrl.StartsWith("ircs://", StringComparison.OrdinalIgnoreCase);
             if (string.IsNullOrEmpty(targetChannel))
             {
                 List<string> ajChans = GetAutoJoinChannelsForServer(normUrl, ExtractHost(normUrl));
@@ -3064,11 +4464,11 @@ namespace NyaaChatNative
                 }
                 else
                 {
-                    targetChannel = GetIni("Server", "DefaultChannel", "#자유대화");
+                    targetChannel = GetIni("Server", "DefaultChannel", isIrc ? "#general" : "#자유대화");
                 }
             }
-            if (string.IsNullOrEmpty(targetChannel)) targetChannel = "#자유대화";
-            if (!targetChannel.StartsWith("#") && !targetChannel.StartsWith("＃"))
+            if (string.IsNullOrEmpty(targetChannel)) targetChannel = isIrc ? "#general" : "#자유대화";
+            if (!targetChannel.StartsWith("#") && !targetChannel.StartsWith("＃") && !targetChannel.StartsWith("&") && !targetChannel.StartsWith("+"))
             {
                 targetChannel = "#" + targetChannel;
             }
@@ -3117,6 +4517,23 @@ namespace NyaaChatNative
             }
 
             // Create brand-new simultaneous server session!
+            if (normUrl.StartsWith("irc://", StringComparison.OrdinalIgnoreCase) || normUrl.StartsWith("ircs://", StringComparison.OrdinalIgnoreCase))
+            {
+                string hostPart;
+                int portPart;
+                bool sslPart;
+                string chanPart;
+                NyaaServerSession.ParseIrcEndpoint(normUrl, out hostPart, out portPart, out sslPart, out chanPart);
+                if (!string.IsNullOrEmpty(chanPart))
+                {
+                    targetChannel = chanPart;
+                }
+                else if (string.IsNullOrEmpty(targetChannel) || targetChannel == "#자유대화" || NyaaServerSession.HasNonAscii(targetChannel))
+                {
+                    targetChannel = "#nyaa";
+                }
+            }
+
             session = new NyaaServerSession(this, normUrl, this.GlobalNickname, this.GlobalUserId, targetChannel, channelKey);
             // Look up password specifically for this server to prevent cross-server credential leaks
             string sKey = session.GetServerKey();
@@ -3128,22 +4545,22 @@ namespace NyaaChatNative
             session.NickPassword = serverPass ?? "";
             this.Sessions[normUrl] = session;
             this.ActiveSession = session;
-            this.ActiveRoomId = targetChannel;
+            this.ActiveRoomId = session.InitialTargetChannel;
 
-            AppendSystemMessageToSession(session, targetChannel, string.Format(
+            AppendSystemMessageToSession(session, session.InitialTargetChannel, string.Format(
                 Tr("* [{0}] 서버에 연결 중입니다... (채널: {1})", "* Connecting to [{0}]... (Channel: {1})"),
-                session.Host, targetChannel
+                session.Host, session.InitialTargetChannel
             ));
             if (normUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
             {
-                AppendSystemMessageToSession(session, targetChannel, string.Format(
+                AppendSystemMessageToSession(session, session.InitialTargetChannel, string.Format(
                     Tr("* [보안 안내] 현재 서버({0})는 TLS 암호화가 없는 일반 연결(ws://)입니다. 중요한 비밀번호 입력에 주의하세요.",
                        "* [Security Notice] Server ({0}) uses unencrypted ws:// instead of wss://. Avoid entering sensitive passwords."),
                     session.Host
                 ));
             }
             RefreshLeftServerTree();
-            SwitchActiveView(session, targetChannel);
+            SwitchActiveView(session, session.InitialTargetChannel);
 
             session.ConnectAsync();
         }
@@ -3867,7 +5284,7 @@ namespace NyaaChatNative
         public void AppendSystemMessageToSession(NyaaServerSession session, string roomId, string text)
         {
             if (session == null) return;
-            if (string.IsNullOrEmpty(roomId)) roomId = "#자유대화";
+            if (string.IsNullOrEmpty(roomId)) roomId = session.GetDefaultSessionRoom();
 
             ChatMessageItem item = new ChatMessageItem
             {
@@ -5215,7 +6632,7 @@ namespace NyaaChatNative
             }
         }
 
-        private void RefreshRightUsersList()
+        public void RefreshRightUsersList()
         {
             this.lstOnlineUsers.BeginUpdate();
             this.lstOnlineUsers.Items.Clear();
@@ -5775,6 +7192,125 @@ namespace NyaaChatNative
                 string targetSrv = parts[idx];
                 string targetCh = parts.Length > idx + 1 ? parts[idx + 1] : "";
                 ConnectOrSwitchToServer(targetSrv, targetCh, "");
+                return;
+            }
+            if (cmd == "raw" || cmd == "quote")
+            {
+                if (string.IsNullOrEmpty(restText))
+                {
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, Tr("* 사용법: /raw <명령어> (서버 원시 프로토콜 명령 전송)", "* Usage: /raw <command> (Send raw protocol command)"));
+                    return;
+                }
+                if (this.ActiveSession != null)
+                {
+                    if (this.ActiveSession.IsIrcSession)
+                    {
+                        this.ActiveSession.SendIrcRaw(restText);
+                        AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, "-> " + restText);
+                    }
+                    else
+                    {
+                        this.ActiveSession.Emit("raw_command", restText);
+                        AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, "-> " + restText);
+                    }
+                }
+                return;
+            }
+            if (cmd == "msg" || cmd == "query" || cmd == "q")
+            {
+                if (parts.Length < 2)
+                {
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, Tr("* 사용법: /msg <닉네임/채널> <메시지> 또는 /query <닉네임>", "* Usage: /msg <nickname/channel> <message> or /query <nickname>"));
+                    return;
+                }
+                string target = parts[1];
+                string msgContent = parts.Length > 2 ? string.Join(" ", parts, 2, parts.Length - 2) : "";
+                if (this.ActiveSession != null)
+                {
+                    if (!this.ActiveSession.Channels.ContainsKey(target))
+                    {
+                        this.ActiveSession.Channels[target] = new ChannelItemInfo
+                        {
+                            Id = target,
+                            Name = target.StartsWith("#") ? target : "@" + target,
+                            Topic = "1:1 대화",
+                            UserCount = 2,
+                            IsPrivate = !target.StartsWith("#")
+                        };
+                        RefreshLeftServerTree();
+                    }
+                    if (cmd == "query" && string.IsNullOrEmpty(msgContent))
+                    {
+                        SwitchActiveView(this.ActiveSession, target);
+                        return;
+                    }
+                    if (!string.IsNullOrEmpty(msgContent))
+                    {
+                        this.ActiveSession.Emit("send_message", new Dictionary<string, object>
+                        {
+                            { "roomId", target },
+                            { "content", msgContent },
+                            { "type", "text" }
+                        });
+                        if (cmd == "query")
+                        {
+                            SwitchActiveView(this.ActiveSession, target);
+                        }
+                    }
+                }
+                return;
+            }
+            if (cmd == "notice")
+            {
+                if (parts.Length < 3)
+                {
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, Tr("* 사용법: /notice <대상> <메시지>", "* Usage: /notice <target> <message>"));
+                    return;
+                }
+                string target = parts[1];
+                string noticeContent = string.Join(" ", parts, 2, parts.Length - 2);
+                if (this.ActiveSession != null)
+                {
+                    if (this.ActiveSession.IsIrcSession)
+                    {
+                        this.ActiveSession.SendIrcRaw(string.Format("NOTICE {0} :{1}", target, noticeContent));
+                        AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, string.Format("-> NOTICE {0}: {1}", target, noticeContent));
+                    }
+                    else
+                    {
+                        SendChatMessageOnActiveSession(trimmed);
+                    }
+                }
+                return;
+            }
+            if (cmd == "names")
+            {
+                string targetRoom = parts.Length >= 2 ? parts[1] : this.ActiveRoomId;
+                if (this.ActiveSession != null && this.ActiveSession.IsIrcSession)
+                {
+                    this.ActiveSession.SendIrcRaw("NAMES " + targetRoom);
+                }
+                else
+                {
+                    SendChatMessageOnActiveSession(trimmed);
+                }
+                return;
+            }
+            if (cmd == "motd")
+            {
+                if (this.ActiveSession != null && this.ActiveSession.IsIrcSession)
+                {
+                    this.ActiveSession.SendIrcRaw("MOTD");
+                }
+                return;
+            }
+            if (cmd == "quit")
+            {
+                if (this.ActiveSession != null)
+                {
+                    this.ActiveSession.Disconnect(true);
+                    AppendSystemMessageToSession(this.ActiveSession, this.ActiveRoomId, Tr("* 서버 연결을 종료했습니다.", "* Disconnected from server."));
+                }
                 return;
             }
             if (cmd == "join" || cmd == "j")
@@ -6642,6 +8178,8 @@ namespace NyaaChatNative
                 sb.AppendLine("• /mode [+ntpsmikl] [args] : Set channel modes (e.g. /mode +k 1234, /mode +v nick)");
                 sb.AppendLine("• /invite <nick> : Invite user  |  /op · /deop · /kick <nick> : Channel Op controls");
                 sb.AppendLine("• /whois <nick> : Query user info  |  /me <action> : Send action message");
+                sb.AppendLine("• /msg <nick> <msg> · /query <nick> : Send private message / Open 1:1 chat");
+                sb.AppendLine("• /raw <cmd> : Send raw protocol command directly to server (IRC compatible)");
                 sb.AppendLine("• /export : Open logs folder  |  /clear : Clear chat");
                 sb.AppendLine("• /settings (or /config, F10) : Open All-in-One Integrated Settings Center");
                 sb.AppendLine("• /modules (or /module) : Open Server Modules Manager (Add/Import/Toggle/Edit)");
@@ -6681,6 +8219,8 @@ namespace NyaaChatNative
                 sb.AppendLine("• /mode [+ntpsmikl] [옵션] : 채널 모드 변경 (예: /mode +k 1234, /mode +m, /mode +v 닉네임)");
                 sb.AppendLine("• /invite <닉네임> : 현재 채널로 초대  |  /op · /deop · /kick <닉네임> : 방장 권한");
                 sb.AppendLine("• /whois <닉네임> : 유저 정보 조회  |  /me <행동> : 행동 묘사");
+                sb.AppendLine("• /msg <닉> <내용> · /query <닉> : 1:1 귓속말 전송 및 개인 대화창 열기");
+                sb.AppendLine("• /raw <명령> : 현재 접속 서버로 원시 프로토콜 명령 직접 전송 (IRC 완벽 호환)");
                 sb.AppendLine("• /export : 로그 폴더 열기  |  /clear : 화면 지우기");
                 sb.AppendLine("• /nickpass <암호> : 닉네임 비밀번호 등록/변경  |  /identify <암호> : 본인 인증 (사칭 방어)");
                 sb.AppendLine("• /settings (또는 /설정, F10) : 설정창 열기 (간편설정 · 고급설정)");
@@ -6748,7 +8288,7 @@ namespace NyaaChatNative
                 dlg.ForeColor = this.ColTextPrimary;
                 ApplyWindowTitleBarTheme(dlg);
 
-                Label l1 = new Label { Text = Tr("추가로 접속할 서버 주소 (현재 서버 연결은 그대로 유지됩니다):", "Server URL to connect (keeps current server connection active):"), Location = new Point(16, 16), AutoSize = true };
+                Label l1 = new Label { Text = Tr("추가로 접속할 서버 주소 (IRC: ircs://호스트:6697 또는 https://...):", "Server URL to connect (IRC: ircs://host:6697 or https://...):"), Location = new Point(16, 16), AutoSize = true };
                 TextBox tUrl = new TextBox { Text = "https://", Location = new Point(16, 40), Width = 370, BackColor = this.ColBgInput, ForeColor = this.ColTextPrimary };
 
                 Label l2 = new Label { Text = Tr("입장할 채널명:", "Channel to join:"), Location = new Point(16, 76), AutoSize = true };
@@ -10033,6 +11573,15 @@ namespace NyaaChatNative
         {
             if (string.IsNullOrEmpty(raw)) return "";
             string s = raw.Trim();
+            if (s.StartsWith("irc://", StringComparison.OrdinalIgnoreCase) || s.StartsWith("ircs://", StringComparison.OrdinalIgnoreCase))
+            {
+                return s.TrimEnd('/');
+            }
+            if (s.StartsWith("irc.", StringComparison.OrdinalIgnoreCase) || s.Contains(":6667") || s.Contains(":6697"))
+            {
+                if (s.Contains(":6697") || s.Contains(":7000")) return "ircs://" + s.TrimEnd('/');
+                return "irc://" + s.TrimEnd('/');
+            }
             if (!s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !s.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
                 s = "https://" + s;
@@ -10058,7 +11607,25 @@ namespace NyaaChatNative
 
         public static string ExtractHost(string url)
         {
-            try { return new Uri(NormalizeUrl(url)).Authority.ToLowerInvariant(); }
+            try
+            {
+                if (string.IsNullOrEmpty(url)) return "";
+                if (url.StartsWith("irc://", StringComparison.OrdinalIgnoreCase))
+                {
+                    string rest = url.Substring("irc://".Length).TrimEnd('/');
+                    int slashIdx = rest.IndexOf('/');
+                    if (slashIdx >= 0) rest = rest.Substring(0, slashIdx);
+                    return rest.ToLowerInvariant();
+                }
+                if (url.StartsWith("ircs://", StringComparison.OrdinalIgnoreCase))
+                {
+                    string rest = url.Substring("ircs://".Length).TrimEnd('/');
+                    int slashIdx = rest.IndexOf('/');
+                    if (slashIdx >= 0) rest = rest.Substring(0, slashIdx);
+                    return rest.ToLowerInvariant();
+                }
+                return new Uri(NormalizeUrl(url)).Authority.ToLowerInvariant();
+            }
             catch { return url; }
         }
 
@@ -10188,7 +11755,7 @@ namespace NyaaChatNative
         {
             this.mainForm = owner;
             this.Text = owner.Tr("Nyaa Chat 네트워크 서버 리스트 & 공개 채널 탐색기 (F2)", "Nyaa Chat Network Server Directory & Public Channel Explorer (F2)");
-            this.Size = new Size(780, 560);
+            this.Size = new Size(780, 600);
             this.StartPosition = FormStartPosition.CenterParent;
             this.BackColor = owner.ColBgWindow;
             this.ForeColor = owner.ColTextPrimary;
@@ -10301,10 +11868,56 @@ namespace NyaaChatNative
                 }
             };
 
+            // Quick Presets Bar
+            Panel presetBar = new Panel
+            {
+                Location = new Point(14, 464),
+                Size = new Size(738, 28),
+                BackColor = owner.ColBgWindow
+            };
+            Label lPresetTitle = new Label { Text = owner.Tr("빠른 프리셋:", "Quick Presets:"), Location = new Point(2, 6), AutoSize = true, Font = CreateUiFont(8.5f, FontStyle.Bold) };
+            presetBar.Controls.Add(lPresetTitle);
+
+            string[][] presetItems = new string[][]
+            {
+                new string[] { "Libera.Chat (SSL)", "ircs://irc.libera.chat:6697", "#nyaa" },
+                new string[] { "Rizon (SSL)", "ircs://irc.rizon.net:6697", "#chat" },
+                new string[] { "OFTC (SSL)", "ircs://irc.oftc.net:6697", "#oftc" },
+                new string[] { "Nyaa Hub", "https://nemulo.duckdns.org", "#자유대화" }
+            };
+
+            int curX = 90;
+            for (int pi = 0; pi < presetItems.Length; pi++)
+            {
+                string pName = presetItems[pi][0];
+                string pUrl = presetItems[pi][1];
+                string pCh = presetItems[pi][2];
+                Button btnP = new Button
+                {
+                    Text = pName,
+                    Location = new Point(curX, 2),
+                    AutoSize = true,
+                    Height = 24,
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = owner.ColBgSidebar,
+                    ForeColor = owner.ColTextPrimary,
+                    Font = CreateUiFont(8.2f),
+                    Cursor = Cursors.Hand
+                };
+                btnP.FlatAppearance.BorderColor = owner.ColBorder;
+                btnP.Click += delegate
+                {
+                    this.txtDirectUrl.Text = pUrl;
+                    this.txtDirectChan.Text = pCh;
+                };
+                presetBar.Controls.Add(btnP);
+                curX += btnP.PreferredSize.Width + 6;
+            }
+
             // Direct Server + Channel Quick Bar at Bottom
             Panel bottomDirectPanel = new Panel
             {
-                Location = new Point(14, 466),
+                Location = new Point(14, 498),
                 Size = new Size(738, 42),
                 BackColor = owner.ColBgHeader
             };
@@ -10350,13 +11963,49 @@ namespace NyaaChatNative
 
             this.Controls.AddRange(new Control[] {
                 lblTopGuide, btnRefresh, this.lvServers,
-                this.lblSelectedServerTitle, this.lvChannels, bottomDirectPanel
+                this.lblSelectedServerTitle, this.lvChannels, presetBar, bottomDirectPanel
             });
+
+            // Initial Presets
+            AddPresetServer("Nyaa Official Network", "https://nemulo.duckdns.org", "nyaa-core-v1", "Nyaa Chat 공식 네이티브 메인 허브", new string[] { "#자유대화", "#게임채널", "#개발자" });
+            AddPresetServer("Libera.Chat IRC (SSL)", "ircs://irc.libera.chat:6697", "irc-rfc2812", "오픈소스 및 글로벌 개발자 커뮤니티 IRC", new string[] { "#libera", "#nyaa", "#linux", "#python" });
+            AddPresetServer("Rizon IRC (SSL)", "ircs://irc.rizon.net:6697", "irc-rfc2812", "애니메이션, 서브컬처 및 게이머 IRC 네트워크", new string[] { "#chat", "#lobby", "#nyaa" });
+            AddPresetServer("OFTC IRC (SSL)", "ircs://irc.oftc.net:6697", "irc-rfc2812", "Open and Free Technology Community IRC", new string[] { "#oftc", "#debian" });
+            PopulateServersListView();
+        }
+
+        private void AddPresetServer(string name, string url, string protocol, string desc, string[] channels)
+        {
+            DirectoryServerEntry entry = new DirectoryServerEntry
+            {
+                ServerName = name,
+                ServerUrl = url,
+                Host = MainForm.ExtractHost(url),
+                Protocol = protocol,
+                Description = desc,
+                IsOnline = true,
+                UserCount = 0
+            };
+            if (channels != null)
+            {
+                for (int i = 0; i < channels.Length; i++)
+                {
+                    entry.PublicChannels.Add(new ChannelItemInfo
+                    {
+                        Id = channels[i],
+                        Name = channels[i],
+                        Topic = desc,
+                        UserCount = 1,
+                        Modes = "+nt"
+                    });
+                }
+            }
+            this.currentServers.Add(entry);
         }
 
         public void OnReceiveNetworkDirectory(Dictionary<string, object> data)
         {
-            this.currentServers.Clear();
+            List<DirectoryServerEntry> newServers = new List<DirectoryServerEntry>();
             if (data.ContainsKey("servers") && data["servers"] is object[])
             {
                 foreach (object raw in (object[])data["servers"])
@@ -10393,10 +12042,20 @@ namespace NyaaChatNative
                             });
                         }
                     }
-                    this.currentServers.Add(entry);
+                    newServers.Add(entry);
                 }
             }
 
+            // Retain IRC presets
+            for (int i = 0; i < this.currentServers.Count; i++)
+            {
+                if (this.currentServers[i].Protocol == "irc-rfc2812")
+                {
+                    newServers.Add(this.currentServers[i]);
+                }
+            }
+
+            this.currentServers = newServers;
             PopulateServersListView();
         }
 

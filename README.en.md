@@ -2,9 +2,10 @@
 
 # 🐾 NyaaChat Client
 
-A lightweight real-time chat client for Windows desktop (.NET Framework 4.8). Runs as a single standalone executable without any external DLLs, and supports simultaneous multi-server connections.
+A lightweight real-time chat client for Windows desktop (.NET Framework 4.8). Runs as a single standalone executable without any external DLLs, and supports simultaneous multi-server connections to both NyaaChat WebSocket servers and standard IRC (RFC 1459/2812) networks.
 
 - 🌐 **Backend Chat Server (Node.js)**: [nyaa-chat-server Repository](https://github.com/nemunemulo/nyaa-chat-server)
+- 📡 **Standard IRC Compatibility**: Connect simultaneously to standard IRC networks such as Libera.Chat, Rizon, and OFTC (`ircs://server:6697`).
 
 ---
 
@@ -23,8 +24,10 @@ Customize and improve it freely to fit your needs!
 
 ```text
 client/
-├── NyaaChat.exe             # Client executable (.NET Framework 4.8)
+├── NyaaChat.exe             # Client executable (.NET Framework 4.8 standalone binary)
 ├── build.bat                # Windows built-in csc.exe compile batch script
+├── src/
+│   └── Program.cs           # Full C# client source code (all-in-one standalone file)
 ├── settings.example.ini     # Settings example (settings.ini auto-generated on first run)
 ├── aliases.txt              # Slash command shortcuts (/j, /w, etc.)
 ├── scripts/
@@ -91,14 +94,18 @@ Avatar=🐾
 ## 🌐 Key Features & Shortcuts
 
 - **Keyboard Shortcuts**:
-  - `F2`: Whitelisted server directory and public channel explorer
-  - `F10`: Settings dialog (server, nickname, language, theme, sound, panel widths, etc.)
+  - `F2`: Server directory & public channel explorer (one-click quick presets)
+  - `F3`: Dual split view toggle (split screen into 2 panes for simultaneous multi-server chat)
+  - `F10`: Settings dialog (language, server, nickname, theme, sounds, panel widths, etc.)
   - `F9` or `/modules`: Server extension module manager
   - `Alt + R`: Custom script editor (`aliases.txt` / `user_script.txt`)
   - `Alt + Q`: Boss key (instantly hide/restore window)
-- **Multi-Server Connection**:
-  - Connected servers are listed on the left tree view; click to switch between servers.
-  - Connect to additional servers concurrently using `/server <URL> [#channel]`.
+  - `Ctrl + L`: Clear active chat buffer
+- **Simultaneous Multi-Server Connections (Nyaa Native & Standard IRC)**:
+  - Connected servers are displayed hierarchically in the left tree; click to switch between servers instantly.
+  - Connect concurrently using `/server <URL> [#channel]`:
+    - Nyaa Server: `/server https://nemulo.duckdns.org #자유대화`
+    - IRC SSL Server: `/server ircs://irc.libera.chat:6697 #nyaa` or `/server ircs://irc.rizon.net:6697 #chat`
 
 ---
 
@@ -106,19 +113,23 @@ Avatar=🐾
 
 | Command | Description | Example |
 | :--- | :--- | :--- |
-| `/help` | View command help | `/help` |
+| `/help` (or `F1`) | View command help | `/help` |
 | `/nick <new_nick>` | Change nickname | `/nick Nyaa` |
 | `/join <#channel> [key]` | Join or create a channel | `/join #gaming` |
 | `/part` (or `/leave`) | Leave current channel | `/part` |
+| `/split [#channel]` (or `F3`) | Open or close dual split view | `/split #gaming` or `/split off` |
 | `/list` | Open channel list dialog | `/list` |
 | `/servers` (or `F2`) | Open server list explorer | `/servers` |
-| `/server <url> [#channel]` | Connect to another server concurrently | `/server https://c.org #gaming` |
+| `/server <url> [#channel]` | Connect to another server concurrently | `/server ircs://irc.libera.chat:6697 #nyaa` |
 | `/whois <nickname>` | View user info | `/whois Alice` |
-| `/msg <nickname> <text>` | Send a 1:1 direct whisper | `/msg Bob Hello!` |
+| `/msg <nickname> <text>` | Send a 1:1 direct whisper (auto-creates query tab) | `/msg Bob Hello!` |
 | `/me <action>` | 3rd person action message | `/me stretches paws` |
+| `/raw <command>` (or `/quote`) | Send raw server protocol command | `/raw TIME` |
+| `/export` (or `/log`) | Export current channel chat log to text file | `/export` |
 | `/lang <ko/en>` | Switch display language | `/lang en` |
 | `/ping` | Check server round-trip latency | `/ping` |
 | `/clear` | Clear chat buffer | `/clear` |
+| `/powershell` (or `/terminal`) | Switch to built-in PowerShell terminal | `/terminal` |
 
 ---
 
