@@ -9,6 +9,21 @@ A lightweight real-time chat client for Windows desktop (.NET Framework 4.8). Ru
 
 ---
 
+## 🔌 Hybrid Protocol Architecture
+
+NyaaChat combines the classic user experience of traditional IRC with modern WebSocket-based real-time communication.
+
+- **Dual Communication Engines**:
+  - **Native NyaaChat Protocol**: Uses Engine.IO v4 / Socket.IO v4 based WebSocket and JSON events (`user_join`, `send_message`, `new_message`, etc.).
+  - **Standard IRC Protocol (RFC 1459 / RFC 2812)**: Embeds a pure C# TCP/TLS IRC client engine without any external dependencies, allowing direct connections to global IRC networks like Libera.Chat and Rizon.
+- **Unified User Interface**:
+  - Regardless of whether a tab connects to a NyaaChat server or a standard IRC network, users interact using the same interface and standard slash commands (`/join`, `/msg`, `/nick`, `/topic`, etc.). The client automatically translates user actions into the respective protocol packets.
+- **Independent Autonomous Peer Directory Model**:
+  - NyaaChat servers maintain isolated chat rooms and do not replicate or cross-broadcast messages.
+  - Neighboring servers exchange only lightweight directory metadata (server status, user counts, and public channel listings) via an HTTP/JSON peer protocol authenticated by `x-peer-token`.
+
+---
+
 ## AI-Friendly & Hackable
 
 NyaaChat Client is designed to be lightweight and simple so anyone can easily customize and extend it.

@@ -9,6 +9,21 @@ Windows 데스크톱용 실시간 채팅 클라이언트입니다. .NET Framewor
 
 ---
 
+## 🔌 하이브리드 통신 아키텍처 (Hybrid Architecture)
+
+NyaaChat은 IRC의 전통적인 사용 경험과 현대적인 WebSocket 기반 통신을 결합한 경량 채팅 시스템입니다.
+
+- **이중 통신 엔진 탑재**:
+  - **NyaaChat 전용 프로토콜**: Engine.IO v4 / Socket.IO v4 기반의 WebSocket 및 JSON 이벤트(`user_join`, `send_message`, `new_message` 등) 통신을 사용합니다.
+  - **표준 IRC 프로토콜 (RFC 1459 / RFC 2812)**: 순수 C# TCP/TLS 스트림으로 구현된 독립 IRC 통신 엔진을 내장하여 Libera.Chat, Rizon 등 전 세계 표준 IRC 네트워크에 직접 접속할 수 있습니다.
+- **단일 인터페이스 통합**:
+  - 사용자는 탭의 종류(NyaaChat 서버 vs 표준 IRC 서버)에 구애받지 않고 동일한 대화창에서 동일한 슬래시 명령어(`/join`, `/msg`, `/nick`, `/topic` 등)로 자연스럽게 대화할 수 있습니다. 클라이언트가 각 프로토콜 규약에 맞게 내부 패킷을 자동으로 변환합니다.
+- **독립 자치 서버 디렉터리 모델**:
+  - NyaaChat 서버들은 서로 채팅 내용을 복제·공유하지 않는 완전한 독립 자치 공간입니다.
+  - 이웃 서버 간에는 오직 HTTP/JSON 기반의 피어 디렉터리 프로토콜(`x-peer-token` 인증)을 통해 서버 상태와 공개 채널 목록만 교환하므로, 서버 간 간섭 없이 가볍고 안전합니다.
+
+---
+
 ## AI를 활용하여 마음껏 뜯어고치세요
 
 NyaaChat 클라이언트는 누구나 쉽게 개조할 수 있도록 가볍고 단순하게 설계되었습니다.
