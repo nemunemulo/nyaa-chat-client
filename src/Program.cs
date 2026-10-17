@@ -412,7 +412,7 @@ namespace NyaaChatNative
 
         private static bool ValidateIrcCertificate(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors sslPolicyErrors)
         {
-            return true;
+            return sslPolicyErrors == SslPolicyErrors.None;
         }
 
         public static void ParseIrcEndpoint(string url, out string targetHost, out int targetPort, out bool useSsl, out string channel)
