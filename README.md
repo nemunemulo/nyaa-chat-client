@@ -81,13 +81,13 @@ build.bat
 
 ```ini
 [Server]
-Url=https://nemulo.duckdns.org
+Url=http://localhost:3000
 DefaultChannel=#자유대화
 AutoConnect=true
-AutoConnectServers=https://nemulo.duckdns.org
+AutoConnectServers=http://localhost:3000
 
 [AutoJoin]
-nemulo.duckdns.org=#자유대화
+localhost:3000=#자유대화
 
 [User]
 DefaultNickname=
@@ -115,7 +115,7 @@ Avatar=🐾
 - **다중 서버 동시 접속 (Nyaa Native & 표준 IRC)**:
   - 좌측 트리에 접속한 서버들이 계층형으로 표시되며, 원클릭으로 서버/채널 간을 즉시 전환할 수 있습니다.
   - `/server <주소> [#채널]` 명령어로 Nyaa 서버 및 표준 IRC 서버에 동시 접속할 수 있습니다:
-    - Nyaa 서버: `/server https://nemulo.duckdns.org #자유대화`
+    - Nyaa 서버: `/server http://localhost:3000 #자유대화`
     - IRC SSL 서버: `/server ircs://irc.libera.chat:6697 #nyaa` 또는 `/server ircs://irc.rizon.net:6697 #chat`
 
 ---

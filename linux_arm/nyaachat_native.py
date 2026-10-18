@@ -346,7 +346,7 @@ class NyaaChatLinuxNativeApp:
         nick = simpledialog.askstring("닉네임 설정", "사용할 닉네임을 입력하세요:", initialvalue=self.nickname, parent=self.root)
         if nick:
             self.nickname = nick.strip()[:16]
-        self.connect_or_switch("https://nemulo.duckdns.org", "#자유대화")
+        self.connect_or_switch("http://localhost:3000", "#자유대화")
 
     def connect_or_switch(self, server_url, channel):
         norm = normalize_url(server_url)

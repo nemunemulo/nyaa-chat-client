@@ -2380,7 +2380,7 @@ namespace NyaaChatNative
             {
                 try
                 {
-                    string defaultServer = NormalizeUrl(GetIni("Server", "Url", "https://nemulo.duckdns.org"));
+                    string defaultServer = NormalizeUrl(GetIni("Server", "Url", "http://localhost:3000"));
                     Uri defUri = new Uri(defaultServer);
                     string defPort = (defUri.Port > 0 && defUri.Port != 80 && defUri.Port != 443) ? ":" + defUri.Port : "";
                     string defKey = (defUri.Host + defPort).ToLowerInvariant();
@@ -4233,7 +4233,7 @@ namespace NyaaChatNative
 
         private void ShowInitialLoginDialog()
         {
-            string defaultServer = GetIni("Server", "Url", "https://nemulo.duckdns.org");
+            string defaultServer = GetIni("Server", "Url", "http://localhost:3000");
             string defaultChan = GetIni("Server", "DefaultChannel", "#자유대화");
             string savedNick = this.GlobalNickname;
             bool autoConnect = GetIni("Server", "AutoConnect", "false").ToLower() == "true";
@@ -9258,7 +9258,7 @@ namespace NyaaChatNative
                 Label lSrvUrl = new Label { Location = new Point(16, 24), AutoSize = true, Font = CreateUiFont( 9f) };
                 TextBox txtSrvUrl = new TextBox
                 {
-                    Text = GetIni("Server", "Url", "https://nemulo.duckdns.org"),
+                    Text = GetIni("Server", "Url", "http://localhost:3000"),
                     Location = new Point(172, 20),
                     Width = 394,
                     BackColor = this.ColBgInput,
@@ -9338,8 +9338,7 @@ namespace NyaaChatNative
                 }
                 if (sbAjInit.Length == 0)
                 {
-                    sbAjInit.AppendLine("tnemu.duckdns.org = #자유채널, #바보, #천천히");
-                    sbAjInit.AppendLine("nemulo.duckdns.org = #자유채널, #바보");
+                    sbAjInit.AppendLine("localhost:3000 = #자유대화");
                 }
                 txtAutoJoinRules.Text = sbAjInit.ToString().TrimEnd();
 
@@ -9403,7 +9402,7 @@ namespace NyaaChatNative
                     SetIniValue("User", "UserId", this.GlobalUserId, true);
                 };
 
-                string defServerUrl = NormalizeUrl(GetIni("Server", "Url", "https://nemulo.duckdns.org"));
+                string defServerUrl = NormalizeUrl(GetIni("Server", "Url", "http://localhost:3000"));
                 string activeServerKey = "";
                 if (this.ActiveSession != null)
                 {
@@ -10523,7 +10522,7 @@ namespace NyaaChatNative
                         {
                             twTarget.Text = (this.ActiveSession != null && !string.IsNullOrEmpty(this.ActiveSession.Host))
                                 ? this.ActiveSession.Host
-                                : ExtractHost(GetIni("Server", "Url", "nemulo.duckdns.org"));
+                                : ExtractHost(GetIni("Server", "Url", "localhost:3000"));
                         };
 
                         Button bwAllSrv = new Button
@@ -11136,7 +11135,7 @@ namespace NyaaChatNative
                     SetIniValue("User", "QuitMessage", txtQuitMsg.Text.Trim(), false);
                     SetIniValue("User", "UserId", this.GlobalUserId, false);
                     string enteredNickPass = txtNickPass.Text.Trim();
-                    string defServerUrlForSave = !string.IsNullOrEmpty(txtSrvUrl.Text.Trim()) ? NormalizeUrl(txtSrvUrl.Text.Trim()) : NormalizeUrl(GetIni("Server", "Url", "https://nemulo.duckdns.org"));
+                    string defServerUrlForSave = !string.IsNullOrEmpty(txtSrvUrl.Text.Trim()) ? NormalizeUrl(txtSrvUrl.Text.Trim()) : NormalizeUrl(GetIni("Server", "Url", "http://localhost:3000"));
                     bool isSaveDefServer = (this.ActiveSession == null || string.Equals(this.ActiveSession.ServerUrl, defServerUrlForSave, StringComparison.OrdinalIgnoreCase));
 
                     if (this.ActiveSession != null)
@@ -11883,7 +11882,7 @@ namespace NyaaChatNative
                 new string[] { "Libera.Chat (SSL)", "ircs://irc.libera.chat:6697", "#nyaa" },
                 new string[] { "Rizon (SSL)", "ircs://irc.rizon.net:6697", "#chat" },
                 new string[] { "OFTC (SSL)", "ircs://irc.oftc.net:6697", "#oftc" },
-                new string[] { "Nyaa Hub", "https://nemulo.duckdns.org", "#자유대화" }
+                new string[] { "Local Server", "http://localhost:3000", "#자유대화" }
             };
 
             int curX = 90;
@@ -11924,7 +11923,7 @@ namespace NyaaChatNative
             Label lDirect = new Label { Text = owner.Tr("직접 서버/채널 입력 접속:", "Direct Server/Channel:"), Location = new Point(10, 12), AutoSize = true };
             this.txtDirectUrl = new TextBox
             {
-                Text = owner.ActiveSession != null ? owner.ActiveSession.ServerUrl : "https://nemulo.duckdns.org",
+                Text = owner.ActiveSession != null ? owner.ActiveSession.ServerUrl : "http://localhost:3000",
                 Location = new Point(170, 9),
                 Width = 240,
                 BackColor = owner.ColBgInput,
@@ -11967,7 +11966,7 @@ namespace NyaaChatNative
             });
 
             // Initial Presets
-            AddPresetServer("Nyaa Official Network", "https://nemulo.duckdns.org", "nyaa-core-v1", "Nyaa Chat 공식 네이티브 메인 허브", new string[] { "#자유대화", "#게임채널", "#개발자" });
+            AddPresetServer("Local Dev Server", "http://localhost:3000", "nyaa-core-v1", "Nyaa Chat 로컬 개발 서버", new string[] { "#자유대화", "#개발자" });
             AddPresetServer("Libera.Chat IRC (SSL)", "ircs://irc.libera.chat:6697", "irc-rfc2812", "오픈소스 및 글로벌 개발자 커뮤니티 IRC", new string[] { "#libera", "#nyaa", "#linux", "#python" });
             AddPresetServer("Rizon IRC (SSL)", "ircs://irc.rizon.net:6697", "irc-rfc2812", "애니메이션, 서브컬처 및 게이머 IRC 네트워크", new string[] { "#chat", "#lobby", "#nyaa" });
             AddPresetServer("OFTC IRC (SSL)", "ircs://irc.oftc.net:6697", "irc-rfc2812", "Open and Free Technology Community IRC", new string[] { "#oftc", "#debian" });

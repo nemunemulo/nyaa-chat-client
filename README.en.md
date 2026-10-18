@@ -84,13 +84,13 @@ On first launch, `settings.ini` is automatically created from `settings.example.
 Language=en
 
 [Server]
-Url=https://nemulo.duckdns.org
+Url=http://localhost:3000
 DefaultChannel=#자유대화
 AutoConnect=true
-AutoConnectServers=https://nemulo.duckdns.org
+AutoConnectServers=http://localhost:3000
 
 [AutoJoin]
-nemulo.duckdns.org=#자유대화
+localhost:3000=#자유대화
 
 [User]
 DefaultNickname=
@@ -119,7 +119,7 @@ Avatar=🐾
 - **Simultaneous Multi-Server Connections (Nyaa Native & Standard IRC)**:
   - Connected servers are displayed hierarchically in the left tree; click to switch between servers instantly.
   - Connect concurrently using `/server <URL> [#channel]`:
-    - Nyaa Server: `/server https://nemulo.duckdns.org #자유대화`
+    - Nyaa Server: `/server http://localhost:3000 #자유대화`
     - IRC SSL Server: `/server ircs://irc.libera.chat:6697 #nyaa` or `/server ircs://irc.rizon.net:6697 #chat`
 
 ---
