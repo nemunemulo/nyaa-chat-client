@@ -80,6 +80,9 @@ build.bat
 프로그램 첫 실행 시 `settings.example.ini`를 바탕으로 `settings.ini`가 자동 생성됩니다.
 
 ```ini
+[General]
+Language=ko             ; 언어 설정: ko (한국어) 또는 en (English)
+
 [Server]
 Url=http://localhost:3000
 DefaultChannel=#자유대화
@@ -94,6 +97,8 @@ DefaultNickname=
 NickPassword=
 Avatar=🐾
 ```
+
+- **`Language`**: 클라이언트 UI 및 시스템 알림 언어입니다 (`ko` / `en`). 첫 실행 시 언어 선택 팝업창이 제공되며 환경설정 창(`F10`) 또는 채팅창 `/lang ko`, `/lang en` 명령어로 언제든지 즉시 전환할 수 있습니다.
 
 - **`Url`**: 기본 접속 서버 주소입니다.
 - **`DefaultChannel`**: 첫 접속 시 입장할 기본 채널입니다.

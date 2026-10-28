@@ -4767,8 +4767,9 @@ namespace NyaaChatNative
             else if (eventName == "channel_key_required" && data != null)
             {
                 string chId = data.ContainsKey("channelId") ? Convert.ToString(data["channelId"]) : "";
-                string msg = data.ContainsKey("message") ? Convert.ToString(data["message"]) : "이 채널은 비밀번호(+k)가 설정되어 있습니다.";
-                AppendSystemMessageToSession(session, this.ActiveRoomId, "* [비밀번호 필요] " + msg);
+                string defMsg = Tr("이 채널은 비밀번호(+k)가 설정되어 있습니다.", "This channel requires a password (+k).");
+                string msg = data.ContainsKey("message") ? Convert.ToString(data["message"]) : defMsg;
+                AppendSystemMessageToSession(session, this.ActiveRoomId, Tr("* [비밀번호 필요] ", "* [Password Required] ") + msg);
                 if (!string.IsNullOrEmpty(chId))
                 {
                     PromptChannelKeyInputDialog(session, chId, msg);
@@ -4777,10 +4778,13 @@ namespace NyaaChatNative
             else if (eventName == "invited_to_channel" && data != null)
             {
                 string chId = data.ContainsKey("channelId") ? Convert.ToString(data["channelId"]) : "";
-                string byNick = data.ContainsKey("inviterNickname") ? Convert.ToString(data["inviterNickname"]) : "누군가";
+                string byNick = data.ContainsKey("inviterNickname") ? Convert.ToString(data["inviterNickname"]) : Tr("누군가", "Someone");
                 if (!string.IsNullOrEmpty(chId))
                 {
-                    AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format("* [채널 초대] [{0}] 님이 귀하를 [{1}] 채널로 초대했습니다. (/join {1})", byNick, chId));
+                    AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format(
+                        Tr("* [채널 초대] [{0}] 님이 귀하를 [{1}] 채널로 초대했습니다. (/join {1})",
+                           "* [Channel Invite] [{0}] invited you to channel [{1}]. (/join {1})"),
+                        byNick, chId));
                 }
             }
             else if (eventName == "nickname_changed" && data != null)
@@ -4791,7 +4795,9 @@ namespace NyaaChatNative
                     session.MyNickname = newNick;
                     this.GlobalNickname = newNick;
                     SetIniValue("User", "DefaultNickname", newNick, true);
-                    AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format("* 닉네임이 \"{0}\"(으)로 변경되었습니다.", newNick));
+                    AppendSystemMessageToSession(session, this.ActiveRoomId, string.Format(
+                        Tr("* 닉네임이 \"{0}\"(으)로 변경되었습니다.", "* Nickname changed to \"{0}\"."),
+                        newNick));
                 }
             }
             else if (eventName == "whois_result" && data != null)
@@ -4813,19 +4819,22 @@ namespace NyaaChatNative
             else if (eventName == "oper_success" && data != null)
             {
                 session.IsMeServerOper = true;
-                string msg = data.ContainsKey("message") ? Convert.ToString(data["message"]) : "관리자 권한이 활성화되었습니다.";
-                AppendSystemMessageToSession(session, this.ActiveRoomId, "* [관리자 인증] " + msg);
+                string defMsg = Tr("서버 총괄 운영자 권한이 승인되었습니다.", "Server Operator privileges granted.");
+                string msg = data.ContainsKey("message") ? Convert.ToString(data["message"]) : defMsg;
+                AppendSystemMessageToSession(session, this.ActiveRoomId, Tr("* [관리자 인증] ", "* [Oper Auth] ") + msg);
                 session.Emit("get_channel_list", new Dictionary<string, object>());
             }
             else if (eventName == "oper_failed" && data != null)
             {
-                string msg = data.ContainsKey("message") ? Convert.ToString(data["message"]) : "관리자 인증 실패";
-                AppendSystemMessageToSession(session, this.ActiveRoomId, "* [인증 실패] " + msg);
+                string defMsg = Tr("관리자 인증 실패", "Operator authentication failed.");
+                string msg = data.ContainsKey("message") ? Convert.ToString(data["message"]) : defMsg;
+                AppendSystemMessageToSession(session, this.ActiveRoomId, Tr("* [인증 실패] ", "* [Auth Failed] ") + msg);
             }
             else if (eventName == "login_error" && data != null)
             {
-                string msg = data.ContainsKey("message") ? Convert.ToString(data["message"]) : "로그인 오류";
-                AppendSystemMessageToSession(session, this.ActiveRoomId, "* [접속 거부]: " + msg);
+                string defMsg = Tr("로그인 오류", "Login error");
+                string msg = data.ContainsKey("message") ? Convert.ToString(data["message"]) : defMsg;
+                AppendSystemMessageToSession(session, this.ActiveRoomId, Tr("* [접속 거부]: ", "* [Connection Denied]: ") + msg);
             }
             else if (eventName == "network_directory_result" && data != null)
             {
@@ -5174,7 +5183,7 @@ namespace NyaaChatNative
                 }
             }
 
-            bool isJoinLeave = msgType == "system" && (content.Contains("입장하셨습니다") || content.Contains("퇴장하셨습니다"));
+            bool isJoinLeave = msgType == "system" && (content.Contains("입장하셨습니다") || content.Contains("퇴장하셨습니다") || content.Contains("has joined") || content.Contains("has left") || content.Contains("joined") || content.Contains("left"));
 
             if (isMention)
             {
